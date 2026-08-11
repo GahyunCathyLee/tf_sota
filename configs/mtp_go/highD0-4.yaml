@@ -1,0 +1,10 @@
+# MTP-GO | highD | baseline | seed 0
+#   python adapters/mtp_go/train.py --config configs/mtp_go/highD0-4.yaml --mode full
+base: _base.yaml
+
+exp_tag: highD0-4
+dataset: highD
+feature_mode: baseline
+
+runtime:
+  seed: 0

@@ -4,7 +4,15 @@ external/*
 !external/.gitkeep
 runs/*
 !runs/.gitkeep
-data/*
+
+# Sweep outputs (configs/mtp_go/_base.yaml writes here)
+ckpts/
+tensorboard/
+
+# Datasets: version the preprocessing/split scripts, never the arrays.
+# Directories must stay un-excluded for the negations below to apply.
+data/**
+!data/**/
+!data/**/*.py
+!data/**/*.md
 !data/.gitkeep
-!data/exiD/*.py
-!data/highD/*.py

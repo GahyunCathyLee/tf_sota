@@ -96,6 +96,9 @@ DEFAULTS: dict[str, Any] = {
     "tensorboard_dir": "",
     "exp_tag": "",
     "scenario_labels": "",
+    # A config may pin the run it describes; --dataset / --feature-mode override.
+    "dataset": "",
+    "feature_mode": "",
     # Reporting convention inherited from NeighFormer configs: RMSE@Ns uses
     # index int(N * eval_hz) - 1. Not the same number as 1/dt on purpose.
     "eval_hz": 3.0,
@@ -124,8 +127,9 @@ SPLITS = ("train", "val", "test")
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--config", required=True, type=Path)
-    p.add_argument("--dataset", required=True, choices=["highD", "exiD"])
-    p.add_argument("--feature-mode", required=True, choices=["baseline", "dimI"])
+    # Optional when the config sets them (e.g. the seed-sweep configs).
+    p.add_argument("--dataset", choices=["highD", "exiD"])
+    p.add_argument("--feature-mode", choices=["baseline", "dimI"])
 
     # Paths. All optional: each falls back to the config, then to a default.
     # Relative paths are resolved against the experiment root.
@@ -199,9 +203,53 @@ DATA_KEY_MAP = {
 }
 
 
-def load_config(path: Path) -> dict[str, Any]:
+def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
+    out = dict(base)
+    for k, v in override.items():
+        if isinstance(v, dict) and isinstance(out.get(k), dict):
+            out[k] = _deep_merge(out[k], v)
+        else:
+            out[k] = v
+    return out
+
+
+def load_raw_config(path: Path, _seen: tuple[Path, ...] = ()) -> dict[str, Any]:
+    """Load a YAML config, resolving an optional `base:` chain.
+
+    `base` is resolved relative to the config's own directory first, then the
+    experiment root. Child keys override the base, merged section by section, so
+    a seed sweep only has to restate what actually changes.
+    """
+    path = path.resolve()
+    if path in _seen:
+        chain = " -> ".join(str(p) for p in (*_seen, path))
+        raise SystemExit(f"Circular config base chain: {chain}")
+    if not path.exists():
+        raise SystemExit(f"Config file not found: {path}")
+
     with path.open("r", encoding="utf-8") as f:
         raw = yaml.safe_load(f) or {}
+
+    base_ref = raw.pop("base", None)
+    if not base_ref:
+        return raw
+
+    candidates = [Path(base_ref)] if Path(base_ref).is_absolute() else [
+        path.parent / base_ref,
+        EXPERIMENT_ROOT / base_ref,
+    ]
+    for cand in candidates:
+        if cand.exists():
+            parent = load_raw_config(cand, (*_seen, path))
+            return _deep_merge(parent, raw)
+    raise SystemExit(
+        f"{path}: base config '{base_ref}' not found. Tried:\n  "
+        + "\n  ".join(str(c) for c in candidates)
+    )
+
+
+def load_config(path: Path) -> dict[str, Any]:
+    raw = load_raw_config(path)
     cfg = dict(DEFAULTS)
     for section in ("training", "model_hparams", "runtime", "smoke", "data"):
         block = raw.get(section)
@@ -219,6 +267,22 @@ def load_config(path: Path) -> dict[str, Any]:
             cfg[k] = v
     cfg["_raw_config"] = raw
     return cfg
+
+
+def resolve_run_target(cfg: dict[str, Any], args: argparse.Namespace) -> None:
+    """Decide which dataset/feature_mode this run is, CLI winning over config."""
+    for name, choices in (("dataset", ("highD", "exiD")),
+                          ("feature_mode", ("baseline", "dimI"))):
+        value = getattr(args, name, None) or str(cfg.get(name, ""))
+        if not value:
+            raise SystemExit(
+                f"--{name.replace('_', '-')} was not given and the config does not set "
+                f"`{name}`. Pass it on the command line or add it to the config."
+            )
+        if value not in choices:
+            raise SystemExit(f"Invalid {name}: {value!r} (expected one of {choices})")
+        setattr(args, name, value)
+        cfg[name] = value
 
 
 def resolve_paths(cfg: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]:
@@ -246,7 +310,7 @@ def resolve_paths(cfg: dict[str, Any], args: argparse.Namespace) -> dict[str, An
         "feature_mode": args.feature_mode,
         "exp_tag": cfg["exp_tag"],
     }
-    for key in ("output_dir", "ckpt_dir", "tensorboard_dir", "data_root"):
+    for key in ("output_dir", "ckpt_dir", "tensorboard_dir", "data_root", "scenario_labels"):
         text = str(cfg[key])  # may arrive as a Path from the CLI
         if "{" in text:
             cfg[key] = text.format(**fields)
@@ -504,7 +568,9 @@ def build_datasets(
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
-    cfg = resolve_paths(apply_overrides(load_config(args.config), args), args)
+    cfg = apply_overrides(load_config(args.config), args)
+    resolve_run_target(cfg, args)
+    cfg = resolve_paths(cfg, args)
 
     output_dir: Path = cfg["output_dir"]
     ckpt_dir: Path = cfg["ckpt_dir"]

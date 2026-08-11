@@ -13,11 +13,11 @@ exp_tag: ""
 # Expected layout: <root>/<dataset>/dimI/*.npy and <root>/<dataset>/splits/*.npy
 # =========================
 data:
-  root: /home/gahyun/neighformer/data
+  root: data
   # RMSE@Ns reporting index = int(N * hz) - 1, same convention as NeighFormer.
   # This is a reporting setting, not the integration step (see runtime.dt).
   hz: 3.0
-  scenario_labels: ""      # "" -> <root>/<dataset>/dimI/scenario_labels.csv
+  scenario_labels: "data/{dataset}/dimI/scenario_labels.csv"
 
 input:
   coordinate_frame: "graph_scene"

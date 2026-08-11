@@ -42,6 +42,49 @@ python adapters/mtp_go/train.py --config configs/models/mtp_go.yaml \
 python adapters/mtp_go/train.py ... --check-data
 ```
 
+### Seed sweep
+
+`configs/mtp_go/` holds one config per run, named exactly like
+`neighformer/configs/`: `<dataset><feature><seed_index>.yaml`, where feature
+`0` = baseline and `1` = dimI, and the seed index is
+`1`→42, `2`→1234, `3`→3407, `4`→0, `5`→777. 2 datasets × 2 feature modes ×
+5 seeds = 20 configs.
+
+```bash
+python adapters/mtp_go/train.py --config configs/mtp_go/highD1-1.yaml --mode full
+```
+
+`dataset` and `feature_mode` come from the config, so `--dataset` /
+`--feature-mode` become optional (CLI still wins if given).
+
+Configs support a `base:` key, resolved relative to the config's own directory
+and then the repo root, and merged section by section. The chain is:
+
+```text
+configs/models/mtp_go.yaml   model, optimiser, dt, data root   <- change hyperparameters HERE
+  configs/mtp_go/_base.yaml  output/ckpt/tensorboard layout keyed by {exp_tag}
+    configs/mtp_go/highD1-1.yaml   exp_tag, dataset, feature_mode, seed  (4 keys)
+```
+
+Each per-run file restates only what changes, so a hyperparameter edit is a
+one-line change in `configs/models/mtp_go.yaml` and cannot silently diverge
+between seeds. Each run gets its own directory:
+
+```text
+runs/mtp_go/<dataset>/<feature_mode>/<exp_tag>/   metrics.json, run_config.yaml, logs
+ckpts/mtp_go/<exp_tag>/                           best.ckpt, last.ckpt
+tensorboard/mtp_go/<exp_tag>/
+```
+
+Run the whole sweep:
+
+```bash
+for c in configs/mtp_go/highD*.yaml configs/mtp_go/exiD*.yaml; do
+  [ "$(basename "$c")" = "_base.yaml" ] && continue
+  python adapters/mtp_go/train.py --config "$c" --mode full
+done
+```
+
 ### Paths
 
 Every path is `CLI > config > default`, and relative paths resolve against the
@@ -56,6 +99,8 @@ runs overwriting each other.
 | `--ckpt-dir` | `training.ckpt_dir` | `<output-dir>/checkpoints`; when set, `<ckpt-dir>/<exp-tag>/` |
 | `--tensorboard-dir` | `training.tensorboard_dir` | `<output-dir>/tensorboard`; always `<dir>/<exp-tag>/` |
 | `--exp-tag` | `exp_tag` | `mtp_go_<dataset>_<feature-mode>` |
+| `--dataset` | `dataset` | required from one of the two |
+| `--feature-mode` | `feature_mode` | required from one of the two |
 | `--config` | — | required |
 
 Other overrides: `--epochs`, `--batch-size`, `--lr`, `--seed`, `--num-workers`,

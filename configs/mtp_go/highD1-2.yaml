@@ -1,0 +1,10 @@
+# MTP-GO | highD | dimI | seed 1234
+#   python adapters/mtp_go/train.py --config configs/mtp_go/highD1-2.yaml --mode full
+base: _base.yaml
+
+exp_tag: highD1-2
+dataset: highD
+feature_mode: dimI
+
+runtime:
+  seed: 1234

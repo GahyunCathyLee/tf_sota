@@ -1,0 +1,10 @@
+# MTP-GO | exiD | baseline | seed 777
+#   python adapters/mtp_go/train.py --config configs/mtp_go/exiD0-5.yaml --mode full
+base: _base.yaml
+
+exp_tag: exiD0-5
+dataset: exiD
+feature_mode: baseline
+
+runtime:
+  seed: 777

@@ -1,0 +1,10 @@
+# MTP-GO | exiD | dimI | seed 3407
+#   python adapters/mtp_go/train.py --config configs/mtp_go/exiD1-3.yaml --mode full
+base: _base.yaml
+
+exp_tag: exiD1-3
+dataset: exiD
+feature_mode: dimI
+
+runtime:
+  seed: 3407

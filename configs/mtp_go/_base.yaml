@@ -1,0 +1,22 @@
+# Shared base for the MTP-GO seed sweep.
+#
+# Everything that must stay identical across the 20 runs lives in
+# configs/models/mtp_go.yaml (model, optimiser, dt, ...). This file only pins the
+# output layout so that each run gets its own directory, keyed by exp_tag.
+#
+# The per-run files (highD0-1.yaml, ...) restate nothing but dataset,
+# feature_mode, exp_tag and seed — so a hyperparameter change is a one-line edit
+# in configs/models/mtp_go.yaml and cannot silently diverge between seeds.
+#
+# Naming follows neighformer/configs:
+#   <dataset><feature><seed_index>
+#     feature    0 = baseline (dx,dy,dvx,dvy,dax,day)
+#                1 = dimI     (+ dim, I)
+#     seed_index 1=42  2=1234  3=3407  4=0  5=777
+
+base: ../models/mtp_go.yaml
+
+training:
+  output_dir: "runs/mtp_go/{dataset}/{feature_mode}/{exp_tag}"
+  ckpt_dir: "ckpts/mtp_go"                 # -> ckpts/mtp_go/<exp_tag>/
+  tensorboard_dir: "tensorboard/mtp_go"    # -> tensorboard/mtp_go/<exp_tag>/
