@@ -1,0 +1,19 @@
+model: mtrpp
+display_name: "MTR++"
+upstream_dir: "external/mtrpp"
+adapter_dir: "adapters/mtrpp"
+input:
+  coordinate_frame: "scene_centric"
+  uses_map: true
+  ego_channels: 6
+  neighbor_baseline_channels: 6
+  raw_neighbor_channels: 10
+  neighbor_dimI_channels: 8
+training:
+  batch_size: 32
+  epochs: 100
+  lr: 0.0001
+  accelerator: "gpu"
+notes:
+  - "Start from the official MTR repo and implement MTR++-style multi-agent experiments when feasible."
+  - "A100 is recommended for full runs."

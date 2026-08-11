@@ -1,0 +1,19 @@
+model: hptr
+display_name: "HPTR"
+upstream_dir: "external/hptr"
+adapter_dir: "adapters/hptr"
+input:
+  coordinate_frame: "polyline_relative_pose"
+  uses_map: true
+  ego_channels: 6
+  neighbor_baseline_channels: 6
+  raw_neighbor_channels: 10
+  neighbor_dimI_channels: 8
+training:
+  batch_size: 32
+  epochs: 100
+  lr: 0.0002
+  accelerator: "gpu"
+notes:
+  - "Full experiments likely need a stronger GPU."
+  - "Can run reduced-agent/highD smoke tests locally once adapter exists."

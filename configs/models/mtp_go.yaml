@@ -1,0 +1,53 @@
+model: mtp_go
+display_name: "MTP-GO"
+upstream_dir: "external/mtp_go"
+adapter_dir: "adapters/mtp_go"
+input:
+  coordinate_frame: "graph_scene"
+  uses_map: false
+  ego_channels: 6
+  neighbor_baseline_channels: 6
+  raw_neighbor_channels: 10
+  neighbor_dimI_channels: 8
+training:
+  batch_size: 128
+  epochs: 100
+  lr: 0.001
+  clip: 5.0
+  teacher_forcing: 0.2
+  log_interval: 100
+  accelerator: "auto"
+model_hparams:
+  motion_model: "2Xnode"        # 2Xnode | neuralode | 1Xint | 2Xint | 3Xint
+  hidden_size: 64
+  n_mixtures: 8
+  gnn_layer: "natt"
+  n_gnn_layers: 1
+  n_heads: 1
+  ode_solver: "rk4"
+  n_ode_hidden: 16
+  n_ode_layers: 1
+  u1_lim: 10.0
+  u2_lim: 10.0
+  init_static: false
+  n_ode_static: false
+  use_edge_features: true
+runtime:
+  seed: 42
+  n_workers: 4
+  # NeighFormer sampling interval: target_hz = 3.0 over 25 Hz raw -> step 8 -> 0.32 s.
+  # The adapter estimates dt from x_ego at startup and warns on a mismatch.
+  dt: 0.32
+smoke:
+  epochs: 4
+  # Loss-schedule horizon for smoke runs: running 4 of 16 epochs exercises the
+  # pure-EWTA phase and the EWTA+NLL warm-up phase. Upstream's schedule breaks
+  # below 16 (epochs // 8 must be > 1).
+  schedule_epochs: 16
+  batch_size: 32
+  train_samples: 2048
+  eval_samples: 1024
+notes:
+  - "Upstream model code is imported from external/mtp_go (symlink to a westny/mtp-go checkout)."
+  - "The adapter defaults to --mode smoke; pass --mode full to start real training."
+  - "exiD has no splits/*_indices.npy yet; use --split-fallback sequential explicitly or generate them."

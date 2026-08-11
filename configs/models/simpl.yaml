@@ -1,0 +1,18 @@
+model: simpl
+display_name: "SIMPL"
+upstream_dir: "external/simpl"
+adapter_dir: "adapters/simpl"
+input:
+  coordinate_frame: "scene_centric"
+  uses_map: true
+  ego_channels: 6
+  neighbor_baseline_channels: 6
+  raw_neighbor_channels: 10
+  neighbor_dimI_channels: 8
+training:
+  batch_size: 128
+  epochs: 100
+  lr: 0.0005
+  accelerator: "gpu"
+notes:
+  - "Lightweight multi-agent baseline; good early SOTA candidate after HiVT/MTP-GO."

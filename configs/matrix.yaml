@@ -1,0 +1,51 @@
+datasets:
+  - highD
+  - exiD
+
+feature_modes:
+  - baseline
+  - dimI
+
+models:
+  - hivt
+  - qcnet
+  - mtrpp
+  - par
+  - simpl
+  - hptr
+  - gameformer
+  - qcnext
+  - motionlm
+  - mtp_go
+  - trajectronpp
+
+splits:
+  train: train
+  val: val
+  test: test
+
+paths:
+  canonical_data_root: "/home/gahyun/neighformer/data"
+  external_root: "external"
+  adapter_root: "adapters"
+  output_root: "runs"
+
+training:
+  history_frames: 6
+  future_frames: 15
+  num_agents: 9
+  batch_size: 128
+  smoke_epochs: 1
+  full_epochs: 100
+  seed: 42
+  device: "cuda:0"
+
+metrics:
+  - ADE
+  - FDE
+  - RMSE
+  - RMSE@1s
+  - RMSE@2s
+  - RMSE@3s
+  - RMSE@4s
+  - RMSE@5s

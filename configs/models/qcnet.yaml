@@ -1,0 +1,19 @@
+model: qcnet
+display_name: "QCNet"
+upstream_dir: "external/qcnet"
+adapter_dir: "adapters/qcnet"
+input:
+  coordinate_frame: "query_centric"
+  uses_map: true
+  ego_channels: 6
+  neighbor_baseline_channels: 6
+  raw_neighbor_channels: 10
+  neighbor_dimI_channels: 8
+training:
+  batch_size: 64
+  epochs: 100
+  lr: 0.0005
+  accelerator: "gpu"
+notes:
+  - "Original code targets Argoverse and Waymo-style motion forecasting."
+  - "Use QCNet marginal prediction first; QCNeXt joint prediction can follow."

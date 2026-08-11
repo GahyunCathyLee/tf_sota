@@ -1,0 +1,19 @@
+model: trajectronpp
+display_name: "Trajectron++"
+upstream_dir: "external/trajectronpp"
+adapter_dir: "adapters/trajectronpp"
+input:
+  coordinate_frame: "environment_graph"
+  uses_map: optional
+  ego_channels: 6
+  neighbor_baseline_channels: 6
+  raw_neighbor_channels: 10
+  neighbor_dimI_channels: 8
+training:
+  batch_size: 64
+  epochs: 100
+  lr: 0.001
+  accelerator: "gpu"
+notes:
+  - "A sibling checkout exists at ../Trajectron-plus-plus."
+  - "Fix highD/exiD standardization and state schema before training."

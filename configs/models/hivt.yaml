@@ -1,0 +1,19 @@
+model: hivt
+display_name: "HiVT"
+upstream_dir: "external/hivt"
+adapter_dir: "adapters/hivt"
+input:
+  coordinate_frame: "agent_centric"
+  uses_map: true
+  ego_channels: 6
+  neighbor_baseline_channels: 6
+  raw_neighbor_channels: 10
+  neighbor_dimI_channels: 8
+training:
+  batch_size: 128
+  epochs: 100
+  lr: 0.0005
+  accelerator: "gpu"
+notes:
+  - "Original code targets Argoverse 1."
+  - "First adapter target: map NeighFormer highD/exiD npy samples to HiVT temporal graph data."

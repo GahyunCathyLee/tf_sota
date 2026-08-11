@@ -1,0 +1,19 @@
+model: motionlm
+display_name: "MotionLM"
+upstream_dir: null
+adapter_dir: "adapters/motionlm"
+input:
+  coordinate_frame: "tokenized_multi_agent"
+  uses_map: true
+  ego_channels: 6
+  neighbor_baseline_channels: 6
+  raw_neighbor_channels: 10
+  neighbor_dimI_channels: 8
+training:
+  batch_size: 32
+  epochs: 100
+  lr: 0.0003
+  accelerator: "gpu"
+notes:
+  - "No official public training code found."
+  - "Implement a compact MotionLM-style tokenizer and autoregressive transformer for highD/exiD."

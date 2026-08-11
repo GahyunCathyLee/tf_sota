@@ -1,0 +1,133 @@
+models:
+  hivt:
+    display_name: "HiVT"
+    paper: "Hierarchical Vector Transformer for Multi-Agent Motion Prediction"
+    upstream_url: "https://github.com/ZikangZhou/HiVT.git"
+    upstream_type: "official"
+    license: "Apache-2.0"
+    original_datasets: ["Argoverse 1"]
+    local_status: "not_cloned"
+    feature_strategy: "Extend agent node feature construction to include baseline or dimI dynamic features."
+    implementation_priority: 1
+    compute_tier: "single_gpu"
+
+  qcnet:
+    display_name: "QCNet"
+    paper: "Query-Centric Trajectory Prediction"
+    upstream_url: "https://github.com/ZikangZhou/QCNet.git"
+    upstream_type: "official"
+    license: "Apache-2.0"
+    original_datasets: ["Argoverse 1", "Argoverse 2", "Waymo Open Motion"]
+    local_status: "not_cloned"
+    feature_strategy: "Add highD/exiD scenario adapter and include dim/I in agent token attributes before query-centric encoding."
+    implementation_priority: 2
+    compute_tier: "a100_recommended"
+
+  mtrpp:
+    display_name: "MTR++"
+    paper: "MTR++: Multi-Agent Motion Prediction with Symmetric Scene Modeling and Guided Intention Querying"
+    upstream_url: "https://github.com/sshaoshuai/MTR.git"
+    upstream_type: "official_mtr_codebase"
+    license: "Apache-2.0"
+    original_datasets: ["Waymo Open Motion"]
+    local_status: "not_cloned"
+    feature_strategy: "Convert highD/exiD scenes to MTR-style scene infos and append dim/I to object trajectory attributes."
+    implementation_priority: 3
+    compute_tier: "a100_recommended"
+
+  par:
+    display_name: "PAR"
+    paper: "Poly-Autoregressive Prediction for Modeling Interactions"
+    upstream_url: "https://github.com/neerjathakkar/PAR.git"
+    upstream_type: "official"
+    license: "check_upstream"
+    original_datasets: ["NuScenes cars", "AVA", "DexYCB"]
+    local_status: "not_cloned"
+    feature_strategy: "Create highD/exiD trajectory-token datamodule; baseline/dimI can be continuous tokens or projected attributes."
+    implementation_priority: 5
+    compute_tier: "single_gpu"
+
+  simpl:
+    display_name: "SIMPL"
+    paper: "A Simple and Efficient Multi-agent Motion Prediction Baseline for Autonomous Driving"
+    upstream_url: "https://github.com/HKUST-Aerial-Robotics/SIMPL.git"
+    upstream_type: "official"
+    license: "MIT"
+    original_datasets: ["Argoverse 1", "Argoverse 2"]
+    local_status: "not_cloned"
+    feature_strategy: "Replace Argoverse feature loader with highD/exiD scene graph features and adjust input channels."
+    implementation_priority: 4
+    compute_tier: "single_gpu"
+
+  hptr:
+    display_name: "HPTR"
+    paper: "Real-Time Motion Prediction via Heterogeneous Polyline Transformer with Relative Pose Encoding"
+    upstream_url: "https://github.com/zhejz/HPTR.git"
+    upstream_type: "official"
+    license: "check_upstream"
+    original_datasets: ["Waymo Open Motion", "Argoverse 2"]
+    local_status: "not_cloned"
+    feature_strategy: "Map highD/exiD agents to heterogeneous polylines; add dim/I as agent polyline attributes."
+    implementation_priority: 6
+    compute_tier: "a100_recommended"
+
+  gameformer:
+    display_name: "GameFormer"
+    paper: "Game-theoretic Modeling and Learning of Transformer-based Interactive Prediction and Planning"
+    upstream_url: "https://github.com/MCZhi/GameFormer.git"
+    upstream_type: "official"
+    license: "check_upstream"
+    original_datasets: ["Waymo Open Motion", "nuPlan"]
+    local_status: "not_cloned"
+    feature_strategy: "Use the interaction_prediction path; create highD/exiD WOMD-like samples without map-heavy fields where possible."
+    implementation_priority: 7
+    compute_tier: "a100_recommended"
+
+  qcnext:
+    display_name: "QCNeXt"
+    paper: "QCNeXt: A Next-Generation Framework For Joint Multi-Agent Trajectory Prediction"
+    upstream_url: "https://github.com/ZikangZhou/QCNet.git"
+    upstream_type: "technical_report_no_standalone_repo_found"
+    license: "Apache-2.0"
+    original_datasets: ["Argoverse 2"]
+    local_status: "not_cloned"
+    feature_strategy: "Start from QCNet code; implement joint multi-agent head only after QCNet highD/exiD adapter is stable."
+    implementation_priority: 8
+    compute_tier: "a100_recommended"
+
+  motionlm:
+    display_name: "MotionLM"
+    paper: "MotionLM: Multi-Agent Motion Forecasting as Language Modeling"
+    upstream_url: null
+    upstream_type: "paper_and_project_page_no_official_training_code_found"
+    license: "n/a"
+    original_datasets: ["Waymo Open Motion"]
+    local_status: "reimplement_required"
+    feature_strategy: "Implement a small trajectory-token language model over highD/exiD; include dim/I in token embedding or side-channel embedding."
+    implementation_priority: 10
+    compute_tier: "a100_recommended"
+
+  mtp_go:
+    display_name: "MTP-GO"
+    paper: "Graph-Based Probabilistic Multi-Agent Trajectory Prediction with Neural ODEs"
+    upstream_url: "https://github.com/westny/mtp-go.git"
+    upstream_type: "official"
+    license: "check_upstream"
+    original_datasets: ["highD", "rounD", "inD"]
+    local_status: "available_as_sibling:../mtp-go"
+    feature_strategy: "Reuse existing highD/highD-imp hooks; normalize naming to baseline/dimI and add exiD adapter."
+    implementation_priority: 1
+    compute_tier: "single_gpu"
+
+  trajectronpp:
+    display_name: "Trajectron++"
+    paper: "Trajectron++: Dynamically-Feasible Trajectory Forecasting With Heterogeneous Data"
+    upstream_url: "https://github.com/StanfordASL/Trajectron-plus-plus.git"
+    alternate_url: "https://github.com/NVlabs/adaptive-prediction.git"
+    upstream_type: "official"
+    license: "MIT"
+    original_datasets: ["nuScenes", "ETH/UCY"]
+    local_status: "available_as_sibling:../Trajectron-plus-plus"
+    feature_strategy: "Fix highD/exiD environment standardization; define VEHICLE state with baseline or dimI channels."
+    implementation_priority: 2
+    compute_tier: "a100_recommended"
