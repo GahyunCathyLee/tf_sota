@@ -2,6 +2,23 @@ model: mtp_go
 display_name: "MTP-GO"
 upstream_dir: "external/mtp_go"
 adapter_dir: "adapters/mtp_go"
+
+# Experiment name for ckpt_dir/<exp_tag>/ and tensorboard/<exp_tag>/.
+# Empty -> mtp_go_<dataset>_<feature_mode>.
+exp_tag: ""
+
+# =========================
+# DATA
+# Relative paths resolve against the sota_experiments root.
+# Expected layout: <root>/<dataset>/dimI/*.npy and <root>/<dataset>/splits/*.npy
+# =========================
+data:
+  root: /home/gahyun/neighformer/data
+  # RMSE@Ns reporting index = int(N * hz) - 1, same convention as NeighFormer.
+  # This is a reporting setting, not the integration step (see runtime.dt).
+  hz: 3.0
+  scenario_labels: ""      # "" -> <root>/<dataset>/dimI/scenario_labels.csv
+
 input:
   coordinate_frame: "graph_scene"
   uses_map: false
@@ -9,14 +26,26 @@ input:
   neighbor_baseline_channels: 6
   raw_neighbor_channels: 10
   neighbor_dimI_channels: 8
+
+# =========================
+# TRAIN
+# =========================
 training:
-  batch_size: 128
+  batch_size: 1024
   epochs: 100
-  lr: 0.001
+  lr: 1.0e-4
   clip: 5.0
   teacher_forcing: 0.2
   log_interval: 100
   accelerator: "auto"
+  output_dir: ""           # "" -> runs/mtp_go/<dataset>/<feature_mode>
+  ckpt_dir: ""             # "" -> <output_dir>/checkpoints; else <ckpt_dir>/<exp_tag>
+  tensorboard_dir: ""      # "" -> <output_dir>/tensorboard
+  use_tensorboard: true
+
+# =========================
+# MODEL
+# =========================
 model_hparams:
   motion_model: "2Xnode"        # 2Xnode | neuralode | 1Xint | 2Xint | 3Xint
   hidden_size: 64
@@ -32,12 +61,14 @@ model_hparams:
   init_static: false
   n_ode_static: false
   use_edge_features: true
+
 runtime:
   seed: 42
-  n_workers: 4
+  n_workers: 8
   # NeighFormer sampling interval: target_hz = 3.0 over 25 Hz raw -> step 8 -> 0.32 s.
   # The adapter estimates dt from x_ego at startup and warns on a mismatch.
   dt: 0.32
+
 smoke:
   epochs: 4
   # Loss-schedule horizon for smoke runs: running 4 of 16 epochs exercises the
@@ -45,9 +76,12 @@ smoke:
   # below 16 (epochs // 8 must be > 1).
   schedule_epochs: 16
   batch_size: 32
+  lr: 1.0e-3
   train_samples: 2048
   eval_samples: 1024
+
 notes:
-  - "Upstream model code is imported from external/mtp_go (symlink to a westny/mtp-go checkout)."
+  - "Upstream model code is imported from external/mtp_go (symlink or clone of westny/mtp-go)."
   - "The adapter defaults to --mode smoke; pass --mode full to start real training."
-  - "exiD has no splits/*_indices.npy yet; use --split-fallback sequential explicitly or generate them."
+  - "batch_size 1024 + lr 1e-4 is upstream's highD pairing and ~6x faster than 128."
+  - "exiD needs splits/*_indices.npy; generate them with neighformer/data/exiD/split.py."

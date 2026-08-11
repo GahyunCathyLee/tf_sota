@@ -4,3 +4,7 @@ external/*
 !external/.gitkeep
 runs/*
 !runs/.gitkeep
+data/*
+!data/.gitkeep
+!data/exiD/*.py
+!data/highD/*.py

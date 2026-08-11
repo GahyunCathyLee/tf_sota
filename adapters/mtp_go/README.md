@@ -4,15 +4,17 @@ Runs the upstream MTP-GO model (GRU-GNN encoder/decoder + neural-ODE motion
 model, MDN output) on the canonical NeighFormer highD/exiD npy data, for the
 shared `baseline` vs `dimI` comparison.
 
-Status: **smoke-verified** on highD (`baseline`, `dimI`) and exiD
-(`baseline`, `dimI`, sequential-split fallback). Full training has not been run.
+Status: **smoke-verified** on highD and exiD, both feature modes, with canonical
+splits. Full training has not been run.
 
 ## Files
 
 | File | Role |
 | --- | --- |
-| `train.py` | CLI entrypoint: data → model → training → metrics/artifacts |
+| `train.py` | Training entry point (equivalent of `neighformer/train.py`) |
+| `evaluate.py` | Evaluation entry point (equivalent of `neighformer/evaluate.py`) |
 | `dataset.py` | NeighFormer npy → MTP-GO PyG scene graphs |
+| `metrics.py` | Metric definitions and report tables, identical to `neighformer/src/metrics.py` |
 | `lit_module.py` | Ego-only validation/test metrics on top of upstream `LitEncoderDecoder` |
 | `upstream.py` | Locates the upstream checkout, imports its modules, builds the motion model |
 
@@ -22,7 +24,7 @@ on `sys.path` and imports `models.gru_gnn`, `models.motion_models`, `base_mdn`
 and `losses` from there. The resolved directory and its commit hash are written
 into `run_config.yaml` / `environment.json` on every run.
 
-## Commands
+## train.py
 
 Environment: `conda activate tf` (torch 2.9.1+cu128, PyG 2.7.0, lightning 2.6.1,
 torchdiffeq 0.2.5).
@@ -30,25 +32,113 @@ torchdiffeq 0.2.5).
 ```bash
 # smoke (default mode): 4 epochs over 2048 train / 1024 eval samples
 python adapters/mtp_go/train.py --config configs/models/mtp_go.yaml \
-  --dataset highD --feature-mode baseline \
-  --data-root /home/gahyun/neighformer/data \
-  --output-dir runs/mtp_go/highD/baseline
+  --dataset highD --feature-mode baseline
 
+# full training (opt-in)
 python adapters/mtp_go/train.py --config configs/models/mtp_go.yaml \
-  --dataset highD --feature-mode dimI \
-  --data-root /home/gahyun/neighformer/data \
-  --output-dir runs/mtp_go/highD/dimI
+  --dataset highD --feature-mode dimI --mode full
 
 # data conversion report only, no training
 python adapters/mtp_go/train.py ... --check-data
-
-# full training (opt-in)
-python adapters/mtp_go/train.py ... --mode full
 ```
 
-Useful overrides: `--epochs`, `--batch-size`, `--lr`, `--seed`, `--num-workers`,
+### Paths
+
+Every path is `CLI > config > default`, and relative paths resolve against the
+`sota_experiments` root. Path strings may contain `{dataset}`, `{feature_mode}`
+and `{exp_tag}` placeholders, so one config can serve the whole matrix without
+runs overwriting each other.
+
+| CLI | Config key | Default |
+| --- | --- | --- |
+| `--data-root` | `data.root` | `data` (expects `<root>/<dataset>/dimI` and `<root>/<dataset>/splits`) |
+| `--output-dir` | `training.output_dir` | `runs/mtp_go/<dataset>/<feature-mode>` |
+| `--ckpt-dir` | `training.ckpt_dir` | `<output-dir>/checkpoints`; when set, `<ckpt-dir>/<exp-tag>/` |
+| `--tensorboard-dir` | `training.tensorboard_dir` | `<output-dir>/tensorboard`; always `<dir>/<exp-tag>/` |
+| `--exp-tag` | `exp_tag` | `mtp_go_<dataset>_<feature-mode>` |
+| `--config` | — | required |
+
+Other overrides: `--epochs`, `--batch-size`, `--lr`, `--seed`, `--num-workers`,
 `--accelerator {auto,gpu,cpu}`, `--max-train-samples`, `--max-eval-samples`,
-`--upstream-dir`, `--resume`.
+`--upstream-dir`, `--resume`, `--no-tensorboard`, `--split-fallback`.
+
+Like `neighformer/train.py`, it logs one line per epoch
+(`loss / val_ade / val_fde / val_nll`), writes TensorBoard scalars, keeps
+`best.ckpt` (monitored on `val_ade`) plus `last.ckpt`, and evaluates the **best**
+checkpoint at the end — not the last epoch.
+
+## evaluate.py
+
+Rebuilds the model from the config stored inside the checkpoint, so only
+`--ckpt` is required.
+
+```bash
+python adapters/mtp_go/evaluate.py --ckpt runs/mtp_go/highD/dimI/checkpoints/best.ckpt
+python adapters/mtp_go/evaluate.py --ckpt .../best.ckpt --split val
+python adapters/mtp_go/evaluate.py --ckpt .../best.ckpt --scenario
+python adapters/mtp_go/evaluate.py --ckpt .../best.ckpt --measure-time --iters 200
+python adapters/mtp_go/evaluate.py --ckpt .../best.ckpt --data-root ./data   # moved data
+```
+
+| Flag | Meaning |
+| --- | --- |
+| `--split {train,val,test}` | default `test` |
+| `--data-root` | override the root stored in the checkpoint (different machine / Colab) |
+| `--scenario` | per event / state breakdown from `scenario_labels.csv` |
+| `--batch-size`, `--num-workers`, `--device` | override the checkpoint's values |
+| `--max-samples` | evaluate only the first N samples |
+| `--measure-time`, `--warmup`, `--iters` | single-sample latency, batch size 1 |
+| `--output-json` | write the metrics to JSON |
+
+Output tables have the same layout as `neighformer/evaluate.py`. Note that
+MTP-GO's single-sample latency is ~89 ms on an A6000 — the 15-step rollout
+propagates an EKF covariance through `vmap(jacrev)` at every step — so
+NeighFormer's default `10,000` iterations takes ~15 minutes. Use `--iters`.
+
+## Metric compatibility with NeighFormer
+
+`metrics.py` reproduces `neighformer/src/metrics.py` exactly so the two models
+can be compared directly:
+
+```text
+ade     = mean_samples( mean_t ||pred - y|| )
+fde     = mean_samples( ||pred_T - y_T|| )
+rmse    = mean_samples( sqrt( mean_t ||pred - y||^2 ) )     # per-sample sqrt
+rmse@Ns = sqrt( sum_samples ||pred_i - y_i||^2 / n ),  i = int(N * hz) - 1
+```
+
+`hz` (`data.hz`, default 3.0) is NeighFormer's reporting convention and is not
+exactly `1/dt` (dt = 0.32 s → 3.125 Hz). The index formula is kept identical on
+purpose; the true time of each reported second is stored next to it as
+`rmse_Ns_actual_seconds` (1s→0.96s, 2s→1.92s, 3s→2.88s, 4s→3.84s, 5s→4.8s).
+MTP-GO is a mixture-density model, so the reported trajectory is the
+most-likely mixture component; `min_ade` / `min_fde` over the 8 components are
+reported as extras.
+
+## Colab
+
+Data at `./data/highD` and `./data/exiD` with the same layout as
+`neighformer/data`. `configs/models/mtp_go_colab.yaml` is preconfigured for it.
+
+```bash
+!git clone https://github.com/GahyunCathyLee/sota_experiments.git
+%cd sota_experiments
+# upstream model code (the fork matches the commit recorded in run_config.yaml)
+!git clone https://github.com/GahyunCathyLee/mtp-go.git external/mtp_go
+
+!pip -q install torch_geometric lightning torchdiffeq
+from google.colab import drive; drive.mount('/content/drive')
+
+# data -> ./data/highD/{dimI,splits}, ./data/exiD/{dimI,splits}
+!python adapters/mtp_go/train.py --config configs/models/mtp_go_colab.yaml \
+    --dataset highD --feature-mode dimI --mode full
+```
+
+The Colab config keeps checkpoints, TensorBoard and metrics on Google Drive, so
+a runtime reset does not lose them; rerun the same command with `--resume` to
+continue from `last.ckpt`. Only `models/`, `base_mdn.py` and `losses.py` are
+imported from the upstream checkout, and those files are unmodified upstream
+code, so a fresh clone works.
 
 ## Feature mapping
 
@@ -119,20 +209,25 @@ the full `step_RMSE` / `step_ADE` arrays.
 
 Splits come from `<data-root>/<dataset>/splits/{train,val,test}_indices.npy`.
 
-- highD: present.
-- **exiD: missing.** The adapter refuses to run and points at
-  `/home/gahyun/neighformer/data/exiD/split.py`. Passing
-  `--split-fallback sequential` opts into a deterministic 70/15/15 sequential
-  split; it logs a warning and records the fallback in `run_config.yaml`. exiD
-  numbers produced this way are not comparable to canonical-split runs.
+- highD: 682,333 / 96,885 / 194,618 (70/10/20).
+- exiD: 471,091 / 67,347 / 135,062 (70/10/20), generated with
+  `neighformer/data/exiD/split.py`.
+
+If the files are missing the adapter refuses to run and points at `split.py`.
+`--split-fallback sequential` opts into a deterministic 70/15/15 sequential
+split; it logs a warning and records the fallback in `run_config.yaml`. Numbers
+produced that way are not comparable to canonical-split runs.
 
 ## Output artifacts
 
-Written to `--output-dir`:
+Written to `--output-dir` (checkpoints and TensorBoard go to their own
+directories when `--ckpt-dir` / `--tensorboard-dir` are given):
 
-- `checkpoints/best.ckpt` (monitored on `val_ade`) and `checkpoints/last.ckpt`
-- `metrics.json` — ADE, FDE, RMSE, minADE/minFDE over the 8 mixture components,
-  NLL, `step_RMSE`, `step_ADE`, `RMSE@1..5s`, for both val and test
+- `<ckpt-dir>/best.ckpt` (monitored on `val_ade`), `last.ckpt`, and a copy of
+  `run_config.yaml` so a checkpoint stays self-describing
+- `tensorboard/<exp-tag>/` — train/val loss and val ADE/FDE/NLL scalars
+- `metrics.json` — ade, fde, rmse, min_ade/min_fde over the 8 mixture components,
+  nll, `step_rmse`, `step_ade`, `rmse_1..5s`, for both val and test
 - `run_config.yaml` — exact command, effective config, feature mapping, split
   provenance, model summary, environment, upstream commit
 - `environment.json` — Python / torch / CUDA / PyG / Lightning / torchdiffeq versions
@@ -143,10 +238,11 @@ Written to `--output-dir`:
 
 - `python -m py_compile` on all adapter files.
 - `scripts/inspect_data.py` for highD baseline.
-- highD `baseline` and `dimI` smoke runs: loss decreases, artifacts written,
-  6 vs 8 input channels confirmed (146,843 vs 147,995 parameters).
-- exiD `baseline` and `dimI`: arrays load and convert (`--check-data`); the
-  missing-split error path was verified, and smoke training was verified with
-  `--split-fallback sequential`.
+- highD and exiD, `baseline` and `dimI` smoke runs: loss decreases, artifacts
+  written, 6 vs 8 input channels confirmed (146,843 vs 147,995 parameters).
+- `evaluate.py` on highD and exiD checkpoints, including `--scenario`
+  (event / state breakdown) and `--measure-time`.
+- Path resolution: config-only, CLI-only, and `{dataset}`/`{feature_mode}`
+  placeholders; Colab-style `./data/<dataset>` layout.
 - Learning check on 512 highD baseline samples, 40 epochs:
   val ADE 16.97 → 1.03 m, FDE 43.62 → 2.64 m, NLL 4794 → 13.

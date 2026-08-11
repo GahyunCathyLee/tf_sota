@@ -48,6 +48,7 @@ from adapters.mtp_go.dataset import (  # noqa: E402
     estimate_dt,
 )
 from adapters.mtp_go.lit_module import evaluate, make_lit_module_class  # noqa: E402
+from adapters.mtp_go.metrics import print_metrics  # noqa: E402
 from adapters.mtp_go.upstream import (  # noqa: E402
     ROTATIONAL_MOTION_MODELS,
     add_upstream_to_path,
@@ -87,12 +88,27 @@ DEFAULTS: dict[str, Any] = {
     "seed": 42,
     "n_workers": 4,
     "accelerator": "auto",
+    # paths — every one of these is overridable on the command line.
+    # "" means "derive it" (see resolve_paths).
+    "data_root": "data",
+    "output_dir": "",
+    "ckpt_dir": "",
+    "tensorboard_dir": "",
+    "exp_tag": "",
+    "scenario_labels": "",
+    # Reporting convention inherited from NeighFormer configs: RMSE@Ns uses
+    # index int(N * eval_hz) - 1. Not the same number as 1/dt on purpose.
+    "eval_hz": 3.0,
+    "use_tensorboard": True,
     # smoke run limits
     "smoke_epochs": 4,
     "smoke_schedule_epochs": 16,
     "smoke_train_samples": 2048,
     "smoke_eval_samples": 1024,
     "smoke_batch_size": 32,
+    # The full-run lr is paired with the full-run batch size, so a smoke run at
+    # batch 32 needs its own lr to show a meaningful loss curve.
+    "smoke_lr": 1.0e-3,
 }
 
 # Upstream's loss schedule uses epochs // 2 (teacher forcing), epochs // 4 (warm-up)
@@ -110,8 +126,21 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--config", required=True, type=Path)
     p.add_argument("--dataset", required=True, choices=["highD", "exiD"])
     p.add_argument("--feature-mode", required=True, choices=["baseline", "dimI"])
-    p.add_argument("--data-root", required=True, type=Path)
-    p.add_argument("--output-dir", required=True, type=Path)
+
+    # Paths. All optional: each falls back to the config, then to a default.
+    # Relative paths are resolved against the experiment root.
+    p.add_argument("--data-root", type=Path,
+                   help="Directory holding <dataset>/dimI and <dataset>/splits (default: config data.root).")
+    p.add_argument("--output-dir", type=Path,
+                   help="Metrics/logs/configs destination (default: runs/mtp_go/<dataset>/<feature-mode>).")
+    p.add_argument("--ckpt-dir", type=Path,
+                   help="Checkpoint destination; <ckpt-dir>/<exp-tag>/ is used (default: <output-dir>/checkpoints).")
+    p.add_argument("--exp-tag", type=str,
+                   help="Experiment name used for the checkpoint/TensorBoard subdirectory "
+                        "(default: mtp_go_<dataset>_<feature-mode>).")
+    p.add_argument("--tensorboard-dir", type=Path,
+                   help="TensorBoard root (default: <output-dir>/tensorboard).")
+    p.add_argument("--no-tensorboard", action="store_true", help="Disable TensorBoard logging.")
 
     p.add_argument("--mode", choices=["smoke", "full"], default="smoke",
                    help="smoke (default): a few epochs on a small subset. full: real training.")
@@ -137,7 +166,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 def setup_logging(output_dir: Path) -> None:
-    output_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        output_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise SystemExit(
+            f"Cannot create the output directory {output_dir}: {exc}\n"
+            "Point --output-dir (or training.output_dir in the config) at a writable "
+            "location. Configs meant for Colab default to /content/drive paths."
+        ) from exc
     LOGGER.setLevel(logging.INFO)
     LOGGER.handlers.clear()
     fmt = logging.Formatter("%(asctime)s %(levelname)s %(message)s")
@@ -149,20 +185,86 @@ def setup_logging(output_dir: Path) -> None:
     LOGGER.addHandler(sh)
 
 
+def resolve_path(p: str | Path) -> Path:
+    """Absolute paths pass through; relative ones resolve against the repo root."""
+    p = Path(p).expanduser()
+    return p if p.is_absolute() else (EXPERIMENT_ROOT / p).resolve()
+
+
+# `data:` block keys are renamed so the flat config stays unambiguous.
+DATA_KEY_MAP = {
+    "root": "data_root",
+    "hz": "eval_hz",
+    "scenario_labels": "scenario_labels",
+}
+
+
 def load_config(path: Path) -> dict[str, Any]:
     with path.open("r", encoding="utf-8") as f:
         raw = yaml.safe_load(f) or {}
     cfg = dict(DEFAULTS)
-    for section in ("training", "model_hparams", "runtime", "smoke"):
+    for section in ("training", "model_hparams", "runtime", "smoke", "data"):
         block = raw.get(section)
-        if isinstance(block, dict):
-            for k, v in block.items():
-                key = f"smoke_{k}" if section == "smoke" else k
-                cfg[key] = v
+        if not isinstance(block, dict):
+            continue
+        for k, v in block.items():
+            if section == "smoke":
+                cfg[f"smoke_{k}"] = v
+            elif section == "data":
+                cfg[DATA_KEY_MAP.get(k, k)] = v
+            else:
+                cfg[k] = v
     for k, v in raw.items():
         if k in cfg:
             cfg[k] = v
     cfg["_raw_config"] = raw
+    return cfg
+
+
+def resolve_paths(cfg: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]:
+    """CLI > config > default, then make everything absolute."""
+    for cli_key, cfg_key in (
+        ("data_root", "data_root"),
+        ("output_dir", "output_dir"),
+        ("ckpt_dir", "ckpt_dir"),
+        ("tensorboard_dir", "tensorboard_dir"),
+        ("exp_tag", "exp_tag"),
+    ):
+        value = getattr(args, cli_key, None)
+        if value is not None:
+            cfg[cfg_key] = value
+
+    if not str(cfg["exp_tag"]):
+        cfg["exp_tag"] = f"mtp_go_{args.dataset}_{args.feature_mode}"
+    if not str(cfg["output_dir"]):
+        cfg["output_dir"] = f"runs/mtp_go/{args.dataset}/{args.feature_mode}"
+
+    # {dataset} / {feature_mode} / {exp_tag} placeholders keep the four runs of
+    # the matrix apart when a single path is configured for all of them.
+    fields = {
+        "dataset": args.dataset,
+        "feature_mode": args.feature_mode,
+        "exp_tag": cfg["exp_tag"],
+    }
+    for key in ("output_dir", "ckpt_dir", "tensorboard_dir", "data_root"):
+        text = str(cfg[key])  # may arrive as a Path from the CLI
+        if "{" in text:
+            cfg[key] = text.format(**fields)
+
+    cfg["data_root"] = resolve_path(cfg["data_root"])
+    cfg["output_dir"] = resolve_path(cfg["output_dir"])
+    cfg["ckpt_dir"] = (
+        resolve_path(cfg["ckpt_dir"]) / cfg["exp_tag"]
+        if str(cfg["ckpt_dir"])
+        else cfg["output_dir"] / "checkpoints"
+    )
+    if args.no_tensorboard:
+        cfg["use_tensorboard"] = False
+    cfg["tensorboard_dir"] = (
+        resolve_path(cfg["tensorboard_dir"])
+        if str(cfg["tensorboard_dir"])
+        else cfg["output_dir"] / "tensorboard"
+    )
     return cfg
 
 
@@ -172,6 +274,7 @@ def apply_overrides(cfg: dict[str, Any], args: argparse.Namespace) -> dict[str, 
     if mode == "smoke":
         cfg["epochs"] = cfg["smoke_epochs"]
         cfg["batch_size"] = cfg["smoke_batch_size"]
+        cfg["lr"] = cfg["smoke_lr"]
         cfg["max_train_samples"] = cfg["smoke_train_samples"]
         cfg["max_eval_samples"] = cfg["smoke_eval_samples"]
     else:
@@ -401,15 +504,15 @@ def build_datasets(
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
-    output_dir: Path = args.output_dir
-    if not output_dir.is_absolute():
-        output_dir = (EXPERIMENT_ROOT / output_dir).resolve()
+    cfg = resolve_paths(apply_overrides(load_config(args.config), args), args)
+
+    output_dir: Path = cfg["output_dir"]
+    ckpt_dir: Path = cfg["ckpt_dir"]
     setup_logging(output_dir)
 
     command = " ".join(shlex.quote(a) for a in [sys.executable, *sys.argv])
-    cfg = apply_overrides(load_config(args.config), args)
 
-    data_root: Path = args.data_root.resolve()
+    data_root: Path = cfg["data_root"]
     data_dir = dataset_dir(data_root, args.dataset)
     spec = DatasetSpec(
         dataset=args.dataset,
@@ -424,11 +527,15 @@ def main(argv: list[str] | None = None) -> int:
     add_upstream_to_path(upstream_dir)
 
     LOGGER.info("mode          : %s", cfg["mode"])
+    LOGGER.info("exp tag       : %s", cfg["exp_tag"])
     LOGGER.info("dataset       : %s (%s)", args.dataset, data_dir)
     LOGGER.info("feature mode  : %s -> %d node channels", args.feature_mode,
                 len(feature_mode_indices(args.feature_mode)))
     LOGGER.info("upstream      : %s", upstream_dir)
     LOGGER.info("output dir    : %s", output_dir)
+    LOGGER.info("ckpt dir      : %s", ckpt_dir)
+    if cfg["use_tensorboard"]:
+        LOGGER.info("tensorboard   : %s", cfg["tensorboard_dir"] / cfg["exp_tag"])
 
     # ---------------------------------------------------------------- dt check
     dt = float(cfg["dt"])
@@ -505,9 +612,14 @@ def main(argv: list[str] | None = None) -> int:
             "1Xint, 2Xint, 3Xint."
         )
 
-    hp = SimpleNamespace(**{k: v for k, v in cfg.items() if not k.startswith("_")})
+    # Everything evaluate.py needs to rebuild this model is stored in the
+    # checkpoint via Lightning's save_hyperparameters(args).
+    hp = SimpleNamespace(**{k: to_plain(v) for k, v in cfg.items() if not k.startswith("_")})
     hp.dataset = f"{args.dataset}-{args.feature_mode}"
     hp.epochs = int(cfg["schedule_epochs"])  # loss/teacher-forcing schedule horizon
+    hp.dataset_name = args.dataset
+    hp.feature_mode = args.feature_mode
+    hp.upstream_dir = str(upstream_dir)
 
     n_features = len(feature_mode_indices(args.feature_mode))
     static_f_dim = 2 * int(bool(cfg["n_ode_static"]))
@@ -556,11 +668,20 @@ def main(argv: list[str] | None = None) -> int:
     accelerator = cfg["accelerator"]
     if accelerator == "auto":
         accelerator = "gpu" if torch.cuda.is_available() else "cpu"
-    ckpt_dir = output_dir / "checkpoints"
+    ckpt_dir.mkdir(parents=True, exist_ok=True)
     checkpoint_cb = ModelCheckpoint(
         dirpath=str(ckpt_dir), filename="best", monitor="val_ade", mode="min",
         save_top_k=1, save_last=True,
     )
+
+    tb_logger = False
+    if cfg["use_tensorboard"]:
+        from lightning.pytorch.loggers import TensorBoardLogger
+
+        tb_logger = TensorBoardLogger(
+            save_dir=str(cfg["tensorboard_dir"]), name=cfg["exp_tag"], version=""
+        )
+
     resume_path = ckpt_dir / "last.ckpt"
     trainer = Trainer(
         max_epochs=int(cfg["epochs"]),
@@ -569,7 +690,7 @@ def main(argv: list[str] | None = None) -> int:
         gradient_clip_val=cfg["clip"],
         log_every_n_steps=int(cfg["log_interval"]),
         callbacks=[checkpoint_cb, make_epoch_logger()],
-        logger=False,
+        logger=tb_logger,
         enable_checkpointing=True,
         default_root_dir=str(output_dir),
     )
@@ -585,9 +706,21 @@ def main(argv: list[str] | None = None) -> int:
     LOGGER.info("training finished in %.1fs", train_seconds)
 
     # ------------------------------------------------------------- evaluation
+    # Report the best checkpoint (monitored on val_ade), not the last epoch.
     device = torch.device("cuda" if accelerator == "gpu" else "cpu")
+    best_path = checkpoint_cb.best_model_path
+    weights_used = "last_epoch"
+    if best_path and Path(best_path).exists():
+        state = torch.load(best_path, map_location="cpu", weights_only=False)["state_dict"]
+        model.load_state_dict(state)
+        weights_used = best_path
+        LOGGER.info("evaluating best checkpoint: %s (val_ade=%.4f)",
+                    best_path, float(checkpoint_cb.best_model_score))
+
+    hz = float(cfg["eval_hz"])
     metrics = {
         "model": "mtp_go",
+        "exp_tag": cfg["exp_tag"],
         "dataset": args.dataset,
         "feature_mode": args.feature_mode,
         "mode": cfg["mode"],
@@ -596,20 +729,20 @@ def main(argv: list[str] | None = None) -> int:
         "train_loss": float(trainer.callback_metrics.get("train_loss", float("nan"))),
         "node_feature_channels": n_features,
         "num_parameters": int(n_params),
-        "val": evaluate(model, val_loader, device, dt),
-        "test": evaluate(model, test_loader, device, dt),
+        "weights_evaluated": weights_used,
+        "val": evaluate(model, val_loader, device, dt, hz=hz),
+        "test": evaluate(model, test_loader, device, dt, hz=hz),
     }
     (output_dir / "metrics.json").write_text(
         json.dumps(to_plain(metrics), indent=2, ensure_ascii=False), encoding="utf-8"
     )
-    LOGGER.info("val  ADE=%.4f FDE=%.4f RMSE=%.4f",
-                metrics["val"].get("ADE", float("nan")),
-                metrics["val"].get("FDE", float("nan")),
-                metrics["val"].get("RMSE", float("nan")))
-    LOGGER.info("test ADE=%.4f FDE=%.4f RMSE=%.4f",
-                metrics["test"].get("ADE", float("nan")),
-                metrics["test"].get("FDE", float("nan")),
-                metrics["test"].get("RMSE", float("nan")))
+    for split in ("val", "test"):
+        m = metrics[split]
+        LOGGER.info("%-4s ADE=%.4f FDE=%.4f RMSE=%.4f (n=%d)", split,
+                    m.get("ade", float("nan")), m.get("fde", float("nan")),
+                    m.get("rmse", float("nan")), m.get("n_samples", 0))
+    print(f"\n====== Test [{cfg['exp_tag']}] ======")
+    print_metrics(metrics["test"])
 
     # ---------------------------------------------------------------- configs
     env = environment_info(upstream_dir)
@@ -621,8 +754,11 @@ def main(argv: list[str] | None = None) -> int:
             "config": str(args.config),
             "dataset": args.dataset,
             "feature_mode": args.feature_mode,
+            "exp_tag": cfg["exp_tag"],
             "data_root": str(data_root),
             "output_dir": str(output_dir),
+            "ckpt_dir": str(ckpt_dir),
+            "tensorboard_dir": str(cfg["tensorboard_dir"]) if cfg["use_tensorboard"] else None,
             "mode": cfg["mode"],
             "split_fallback": args.split_fallback,
         },
@@ -646,12 +782,15 @@ def main(argv: list[str] | None = None) -> int:
             "data_report": str(output_dir / "data_report.json"),
         },
     }
-    with (output_dir / "run_config.yaml").open("w", encoding="utf-8") as f:
-        yaml.safe_dump(to_plain(run_config), f, sort_keys=False, allow_unicode=True)
+    for target in {output_dir, ckpt_dir}:
+        target.mkdir(parents=True, exist_ok=True)
+        with (target / "run_config.yaml").open("w", encoding="utf-8") as f:
+            yaml.safe_dump(to_plain(run_config), f, sort_keys=False, allow_unicode=True)
     (output_dir / "environment.json").write_text(
         json.dumps(to_plain(env), indent=2, ensure_ascii=False), encoding="utf-8"
     )
     LOGGER.info("artifacts written to %s", output_dir)
+    LOGGER.info("checkpoints    : %s", ckpt_dir)
     if cfg["mode"] == "smoke":
         LOGGER.info("This was a SMOKE run. Use --mode full for real training.")
     return 0
