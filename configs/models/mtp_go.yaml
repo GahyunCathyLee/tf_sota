@@ -64,7 +64,7 @@ model_hparams:
 
 runtime:
   seed: 42
-  n_workers: 8
+  n_workers: 24
   # NeighFormer sampling interval: target_hz = 3.0 over 25 Hz raw -> step 8 -> 0.32 s.
   # The adapter estimates dt from x_ego at startup and warns on a mismatch.
   dt: 0.32

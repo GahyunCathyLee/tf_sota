@@ -469,6 +469,32 @@ def make_epoch_logger() -> Any:
     return EpochLogger()
 
 
+def make_progress_bar(train_loader: Any) -> Any:
+    """Progress bar for training only; validation is short, so it just reports results."""
+    from lightning.pytorch.callbacks import TQDMProgressBar
+    from lightning.pytorch.callbacks.progress.tqdm_progress import Tqdm
+
+    class TrainOnlyProgressBar(TQDMProgressBar):
+        # Built directly rather than via super(), whose defaults read trainer
+        # state only needed for a bar that actually renders.
+        @staticmethod
+        def _silent() -> Tqdm:
+            return Tqdm(disable=True)
+
+        def init_validation_tqdm(self) -> Tqdm:
+            return self._silent()
+
+        def init_sanity_tqdm(self) -> Tqdm:
+            return self._silent()
+
+    # A non-TTY stdout (nohup / redirect / tmux log) cannot handle the bar's
+    # carriage returns, so every refresh lands on its own line. Refreshing once
+    # per 10% of the epoch keeps that to a handful of lines instead of hundreds.
+    if sys.stdout.isatty():
+        return TrainOnlyProgressBar()
+    return TrainOnlyProgressBar(refresh_rate=max(1, len(train_loader) // 10))
+
+
 def to_plain(obj: Any) -> Any:
     """Coerce numpy scalars, Paths and str/int subclasses into YAML/JSON-safe types."""
     if isinstance(obj, dict):
@@ -755,7 +781,7 @@ def main(argv: list[str] | None = None) -> int:
         devices=1,
         gradient_clip_val=cfg["clip"],
         log_every_n_steps=int(cfg["log_interval"]),
-        callbacks=[checkpoint_cb, make_epoch_logger()],
+        callbacks=[checkpoint_cb, make_epoch_logger(), make_progress_bar(train_loader)],
         logger=tb_logger,
         enable_checkpointing=True,
         default_root_dir=str(output_dir),

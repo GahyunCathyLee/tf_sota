@@ -1,73 +1,30 @@
-# MTP-GO on Colab.
-# Data is expected at ./data/highD and ./data/exiD (same layout as neighformer):
-#   ./data/<dataset>/dimI/*.npy
-#   ./data/<dataset>/splits/*_indices.npy
-# Checkpoints and TensorBoard go to Google Drive so they survive a runtime reset.
+# MTP-GO on Colab — single run (not the seed sweep).
+#
+# Inherits every hyperparameter from mtp_go.yaml and only redirects the outputs
+# to Google Drive, so a runtime reset does not lose checkpoints.
 #
 #   python adapters/mtp_go/train.py --config configs/models/mtp_go_colab.yaml \
-#     --dataset highD --feature-mode dimI --mode full
+#       --dataset highD --feature-mode dimI --mode full
+#
+# For the 5-seed sweep use configs/mtp_go/<dataset><0|1>-<1..5>.yaml and pass
+# --output-dir/--ckpt-dir/--tensorboard-dir on the command line (see the adapter
+# README, "Colab" section).
 
-model: mtp_go
+base: mtp_go.yaml
+
 display_name: "MTP-GO (Colab)"
-upstream_dir: "external/mtp_go"
-adapter_dir: "adapters/mtp_go"
 
-exp_tag: ""
-
-data:
-  root: data
-  hz: 3.0
-  scenario_labels: ""
-
-input:
-  coordinate_frame: "graph_scene"
-  uses_map: false
-  ego_channels: 6
-  neighbor_baseline_channels: 6
-  raw_neighbor_channels: 10
-  neighbor_dimI_channels: 8
+# Data is expected at ./data/<dataset>/{dimI,splits}, the same layout as
+# neighformer/data — that is already mtp_go.yaml's default, so `data:` needs no
+# override here.
 
 training:
-  batch_size: 1024
-  epochs: 100
-  lr: 1.0e-4
-  clip: 5.0
-  teacher_forcing: 0.2
-  log_interval: 100
-  accelerator: "auto"
-  # {dataset} / {feature_mode} / {exp_tag} are substituted, so the four runs of
-  # the matrix never overwrite each other.
+  # {dataset} / {feature_mode} / {exp_tag} are substituted, so runs never
+  # overwrite each other.
   output_dir: "/content/drive/MyDrive/TrajectoryPrediction/sota_experiments/runs/mtp_go/{dataset}/{feature_mode}"
   ckpt_dir: "/content/drive/MyDrive/TrajectoryPrediction/sota_experiments/ckpts"
   tensorboard_dir: "/content/drive/MyDrive/TrajectoryPrediction/sota_experiments/tensorboard"
-  use_tensorboard: true
-
-model_hparams:
-  motion_model: "2Xnode"
-  hidden_size: 64
-  n_mixtures: 8
-  gnn_layer: "natt"
-  n_gnn_layers: 1
-  n_heads: 1
-  ode_solver: "rk4"
-  n_ode_hidden: 16
-  n_ode_layers: 1
-  u1_lim: 10.0
-  u2_lim: 10.0
-  init_static: false
-  n_ode_static: false
-  use_edge_features: true
 
 runtime:
-  seed: 42
   # Colab VMs typically expose 2-8 cores; 2-4 workers is the sweet spot there.
   n_workers: 2
-  dt: 0.32
-
-smoke:
-  epochs: 4
-  schedule_epochs: 16
-  batch_size: 32
-  lr: 1.0e-3
-  train_samples: 2048
-  eval_samples: 1024
