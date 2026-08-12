@@ -1,0 +1,7 @@
+base: ../models/simpl.yaml
+
+# Naming follows neighformer/configs:
+#   <dataset><feature>-<seed_index>
+#     feature    0 = baseline (pva)
+#                1 = dimI     (pva + dim, I)
+#     seed_index 1=42  2=1234  3=3407  4=0  5=777

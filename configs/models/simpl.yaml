@@ -1,18 +1,42 @@
-model: simpl
+adapter: simpl
+model_name: simpl
 display_name: "SIMPL"
-upstream_dir: "external/simpl"
-adapter_dir: "adapters/simpl"
-input:
-  coordinate_frame: "scene_centric"
-  uses_map: true
-  ego_channels: 6
-  neighbor_baseline_channels: 6
-  raw_neighbor_channels: 10
-  neighbor_dimI_channels: 8
+
+data:
+  root: data
+  hz: 3.0
+  batch_size: 1024
+  num_workers: 4
+  pin_memory: true
+  persistent_workers: true
+
+model:
+  d_actor: 128
+  n_fpn_scale: 3
+  in_lane: 10
+  d_lane: 128
+  d_rpe_in: 5
+  d_rpe: 128
+  d_embed: 128
+  n_scene_layer: 4
+  n_scene_head: 8
+  dropout: 0.1
+  update_edge: true
+  param_out: none
+  param_order: 5
+  g_num_modes: 6
+
 training:
-  batch_size: 128
   epochs: 100
-  lr: 0.0005
-  accelerator: "gpu"
-notes:
-  - "Lightweight multi-agent baseline; good early SOTA candidate after HiVT/MTP-GO."
+  lr: 5.0e-4
+  weight_decay: 0.0
+  grad_clip_norm: 5.0
+  device: cuda
+  ckpt_dir: ckpts/simpl
+  tensorboard_dir: tensorboard/simpl
+  output_dir: runs/simpl/{dataset}/{feature_mode}/{exp_tag}
+  lane_half_length: 120.0
+  upstream_dir: external/simpl
+
+runtime:
+  seed: 42

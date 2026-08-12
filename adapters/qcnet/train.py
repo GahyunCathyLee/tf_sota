@@ -166,6 +166,27 @@ def set_seed(seed: int) -> None:
         torch.cuda.manual_seed_all(seed)
 
 
+def make_progress_bar(train_loader: Any) -> Any:
+    """Keep the training bar, but silence validation/sanity-check bars."""
+    from pytorch_lightning.callbacks import TQDMProgressBar
+    from pytorch_lightning.callbacks.progress.tqdm_progress import Tqdm
+
+    class TrainOnlyProgressBar(TQDMProgressBar):
+        @staticmethod
+        def _silent() -> Tqdm:
+            return Tqdm(disable=True)
+
+        def init_validation_tqdm(self) -> Tqdm:
+            return self._silent()
+
+        def init_sanity_tqdm(self) -> Tqdm:
+            return self._silent()
+
+    if sys.stdout.isatty():
+        return TrainOnlyProgressBar()
+    return TrainOnlyProgressBar(refresh_rate=max(1, len(train_loader) // 10))
+
+
 def subset_indices(indices: np.ndarray, limit: int | None) -> np.ndarray:
     return indices if limit is None else indices[: int(limit)]
 
@@ -290,6 +311,7 @@ def main(argv: list[str] | None = None) -> int:
         ModelCheckpoint(dirpath=str(ckpt_dir), filename="lightning-best", monitor="val_minFDE", mode="min",
                         save_top_k=1, save_last=True),
         LearningRateMonitor(logging_interval="epoch"),
+        make_progress_bar(train_loader),
     ]
     trainer = pl.Trainer(
         accelerator=str(cfg["accelerator"]),

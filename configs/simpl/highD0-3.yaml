@@ -1,0 +1,7 @@
+# SIMPL | highD | baseline | seed 3407
+base: _base.yaml
+exp_tag: highD0-3
+dataset: highD
+feature_mode: baseline
+runtime:
+  seed: 3407

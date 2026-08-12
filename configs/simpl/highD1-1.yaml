@@ -1,0 +1,7 @@
+# SIMPL | highD | dimI | seed 42
+base: _base.yaml
+exp_tag: highD1-1
+dataset: highD
+feature_mode: dimI
+runtime:
+  seed: 42
