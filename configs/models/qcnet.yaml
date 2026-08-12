@@ -1,19 +1,53 @@
-model: qcnet
-display_name: "QCNet"
-upstream_dir: "external/qcnet"
-adapter_dir: "adapters/qcnet"
-input:
-  coordinate_frame: "query_centric"
-  uses_map: true
-  ego_channels: 6
-  neighbor_baseline_channels: 6
-  raw_neighbor_channels: 10
-  neighbor_dimI_channels: 8
+# Shared QCNet hyperparameters for highD/exiD runs.
+#
+# Per-run configs at configs/<dataset><feature>-<seed>.yaml only set
+# dataset / feature_mode / exp_tag / seed. Edit model or optimiser settings here
+# to keep the sweep consistent.
+
+data:
+  root: data
+  hz: 3.0
+  batch_size: 32
+  num_workers: 4
+  pin_memory: true
+  persistent_workers: true
+
+model:
+  dataset: argoverse_v2
+  input_dim: 2
+  hidden_dim: 64
+  output_dim: 2
+  output_head: false
+  num_historical_steps: 6
+  num_future_steps: 15
+  num_modes: 6
+  num_recurrent_steps: 3
+  num_freq_bands: 32
+  num_map_layers: 1
+  num_agent_layers: 2
+  num_dec_layers: 2
+  num_heads: 4
+  head_dim: 16
+  dropout: 0.1
+  pl2pl_radius: 150.0
+  time_span: 6
+  pl2a_radius: 150.0
+  a2a_radius: 150.0
+  num_t2m_steps: 6
+  pl2m_radius: 150.0
+  a2m_radius: 150.0
+  lr: 5.0e-4
+  weight_decay: 1.0e-4
+
 training:
-  batch_size: 64
-  epochs: 100
-  lr: 0.0005
-  accelerator: "gpu"
-notes:
-  - "Original code targets Argoverse and Waymo-style motion forecasting."
-  - "Use QCNet marginal prediction first; QCNeXt joint prediction can follow."
+  epochs: 200
+  accelerator: auto
+  devices: 1
+  ckpt_dir: ckpts/qcnet
+  tensorboard_dir: tensorboard/qcnet
+  output_dir: runs/qcnet/{dataset}/{feature_mode}/{exp_tag}
+  lane_half_length: 120.0
+  upstream_dir: external/qcnet
+
+runtime:
+  seed: 42

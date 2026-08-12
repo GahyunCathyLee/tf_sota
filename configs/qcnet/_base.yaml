@@ -1,0 +1,7 @@
+base: ../models/qcnet.yaml
+
+# Naming follows neighformer/configs:
+#   <dataset><feature>-<seed_index>
+#     feature    0 = baseline (dx,dy,dvx,dvy,dax,day)
+#                1 = dimI     (+ dim, I)
+#     seed_index 1=42  2=1234  3=3407  4=0  5=777

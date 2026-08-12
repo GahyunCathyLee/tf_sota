@@ -1,0 +1,7 @@
+# QCNet | exiD | dimI | seed 0
+base: qcnet/_base.yaml
+exp_tag: exiD1-4
+dataset: exiD
+feature_mode: dimI
+runtime:
+  seed: 0

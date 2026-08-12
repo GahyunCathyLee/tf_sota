@@ -1,0 +1,7 @@
+# QCNet | exiD | baseline | seed 3407
+base: qcnet/_base.yaml
+exp_tag: exiD0-3
+dataset: exiD
+feature_mode: baseline
+runtime:
+  seed: 3407
