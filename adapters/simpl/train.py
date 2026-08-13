@@ -8,6 +8,7 @@ import json
 import math
 import random
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -52,6 +53,7 @@ DEFAULTS: dict[str, Any] = {
     "lane_cache_root": "{data_root}/{dataset}/simpl_lane_graph",
     "lane_radius": 120.0,
     "lane_max_segments": 192,
+    "log_interval": 200,
     "max_train_samples": None,
     "max_eval_samples": None,
     "upstream_dir": "external/simpl",
@@ -80,6 +82,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--lane-cache-root", type=Path)
     p.add_argument("--lane-radius", type=float)
     p.add_argument("--lane-max-segments", type=int)
+    p.add_argument("--log-interval", type=int)
     p.add_argument("--upstream-dir", type=Path)
     p.add_argument("--check-data", action="store_true")
     return p.parse_args(argv)
@@ -150,6 +153,7 @@ def apply_cli(cfg: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]:
         ("lane_cache_root", "lane_cache_root"),
         ("lane_radius", "lane_radius"),
         ("lane_max_segments", "lane_max_segments"),
+        ("log_interval", "log_interval"),
         ("upstream_dir", "upstream_dir"),
     ):
         value = getattr(args, cli_name)
@@ -340,6 +344,7 @@ def main(argv: list[str] | None = None) -> int:
         totals = {"loss": 0.0, "reg_loss": 0.0, "cls_loss": 0.0}
         n_batches = 0
         optimizer.zero_grad(set_to_none=True)
+        epoch_start = time.perf_counter()
         for data in train_loader:
             out = model(model.pre_process(data))
             loss, parts = simpl_loss(out, data, device)
@@ -351,6 +356,19 @@ def main(argv: list[str] | None = None) -> int:
             for k in totals:
                 totals[k] += parts[k]
             n_batches += 1
+            if int(cfg["log_interval"]) > 0 and n_batches % int(cfg["log_interval"]) == 0:
+                elapsed = time.perf_counter() - epoch_start
+                batches_total = len(train_loader)
+                samples_seen = min(n_batches * train_batch_size, len(train_ds))
+                avg_loss = totals["loss"] / max(1, n_batches)
+                print(
+                    f"  train epoch={epoch:03d} "
+                    f"batch={n_batches:,}/{batches_total:,} "
+                    f"samples={samples_seen:,}/{len(train_ds):,} "
+                    f"loss={avg_loss:.4f} "
+                    f"elapsed={elapsed / 60.0:.1f}m",
+                    flush=True,
+                )
         if n_batches % accum_steps != 0:
             torch.nn.utils.clip_grad_norm_(model.parameters(), float(cfg["grad_clip_norm"]))
             optimizer.step()
