@@ -12,7 +12,7 @@ data:
 
 model:
   d_actor: 128
-  n_fpn_scale: 3
+  n_fpn_scale: 2
   in_lane: 10
   d_lane: 128
   d_rpe_in: 5
