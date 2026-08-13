@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import random
 import sys
 from pathlib import Path
@@ -34,6 +35,7 @@ DEFAULTS: dict[str, Any] = {
     "data_root": "data",
     "eval_hz": 3.0,
     "batch_size": 1024,
+    "micro_batch_size": None,
     "num_workers": 4,
     "pin_memory": True,
     "persistent_workers": True,
@@ -68,6 +70,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--exp-tag")
     p.add_argument("--epochs", type=int)
     p.add_argument("--batch-size", type=int)
+    p.add_argument("--micro-batch-size", type=int)
     p.add_argument("--num-workers", type=int)
     p.add_argument("--seed", type=int)
     p.add_argument("--device")
@@ -137,6 +140,7 @@ def apply_cli(cfg: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]:
         ("exp_tag", "exp_tag"),
         ("epochs", "epochs"),
         ("batch_size", "batch_size"),
+        ("micro_batch_size", "micro_batch_size"),
         ("num_workers", "num_workers"),
         ("seed", "seed"),
         ("device", "device"),
@@ -305,8 +309,11 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(data_report, indent=2))
         return 0
 
+    effective_batch_size = int(cfg["batch_size"])
+    train_batch_size = int(cfg.get("micro_batch_size") or cfg["batch_size"])
+    accum_steps = max(1, int(math.ceil(effective_batch_size / train_batch_size)))
     loader_kwargs = {
-        "batch_size": int(cfg["batch_size"]),
+        "batch_size": train_batch_size,
         "num_workers": int(cfg["num_workers"]),
         "pin_memory": bool(cfg["pin_memory"]),
         "persistent_workers": bool(cfg["persistent_workers"]) and int(cfg["num_workers"]) > 0,
@@ -323,6 +330,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"data     : {data_path}")
     print(f"lanes    : {lane_cache_root if lane_cache_root else 'pseudo fallback'}")
     print(f"samples  : train={len(train_ds):,} val={len(val_ds):,}")
+    print(f"batch    : micro={train_batch_size} effective={effective_batch_size} accum={accum_steps}")
     print(f"device   : {device}")
     print(f"ckpt     : {ckpt_dir}")
 
@@ -331,16 +339,22 @@ def main(argv: list[str] | None = None) -> int:
         model.train()
         totals = {"loss": 0.0, "reg_loss": 0.0, "cls_loss": 0.0}
         n_batches = 0
+        optimizer.zero_grad(set_to_none=True)
         for data in train_loader:
             out = model(model.pre_process(data))
             loss, parts = simpl_loss(out, data, device)
-            optimizer.zero_grad(set_to_none=True)
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), float(cfg["grad_clip_norm"]))
-            optimizer.step()
+            (loss / accum_steps).backward()
+            if (n_batches + 1) % accum_steps == 0:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), float(cfg["grad_clip_norm"]))
+                optimizer.step()
+                optimizer.zero_grad(set_to_none=True)
             for k in totals:
                 totals[k] += parts[k]
             n_batches += 1
+        if n_batches % accum_steps != 0:
+            torch.nn.utils.clip_grad_norm_(model.parameters(), float(cfg["grad_clip_norm"]))
+            optimizer.step()
+            optimizer.zero_grad(set_to_none=True)
         train_loss = totals["loss"] / max(1, n_batches)
         val = evaluate_model(model, val_loader, device, float(cfg["eval_hz"]))
         print(
