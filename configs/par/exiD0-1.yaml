@@ -1,0 +1,10 @@
+# PAR | exiD | baseline | seed 42
+base: _base.yaml
+
+exp_tag: exiD0-1
+dataset: exiD
+feature_mode: baseline
+
+runtime:
+  seed: 42
+

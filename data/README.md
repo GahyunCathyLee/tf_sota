@@ -32,6 +32,24 @@ different versions of these scripts are not comparable.
 `neighformer/data/NGSIM/` is not vendored: NGSIM is not part of the
 `configs/matrix.yaml` experiment matrix (highD and exiD only).
 
+## PAR Extras
+
+PAR needs fixed-identity neighbour futures to keep its multi-agent
+autoregressive token structure. Do not modify `../neighformer`; build a
+repo-local PAR data root instead:
+
+```bash
+python data/par/preprocess.py --dataset both \
+  --source-data-root /home/gahyun/neighformer/data \
+  --output-root data/par
+```
+
+This symlinks the canonical highD/exiD arrays and splits, then writes PAR-only
+arrays under `data/par/<dataset>/dimI/`: `nb_ids.npy`, `nb_attr.npy`,
+`x_nb_abs.npy`, `y_nb.npy`, and their masks. The usual `baseline` vs `dimI`
+feature selection still comes from `x_nb.npy`; PAR uses `nb_attr.npy` only for
+the continuous `[dim, I]` side-channel in `dimI` mode.
+
 ## Regenerating
 
 ```bash

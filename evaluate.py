@@ -19,6 +19,8 @@ def detect_adapter(ckpt_path: Path) -> str:
     adapter = cfg.get("adapter")
     if adapter:
         return str(adapter)
+    if "/par/" in str(path).replace("\\", "/"):
+        return "par"
     if "model_cfg" in ckpt or "/simpl/" in str(path).replace("\\", "/"):
         return "simpl"
     return "qcnet"
@@ -31,6 +33,8 @@ def main(argv: list[str] | None = None) -> int:
     adapter = detect_adapter(known.ckpt)
     if adapter == "simpl":
         from adapters.simpl.evaluate import main as adapter_main
+    elif adapter == "par":
+        from adapters.par.evaluate import main as adapter_main
     elif adapter == "qcnet":
         from adapters.qcnet.evaluate import main as adapter_main
     else:

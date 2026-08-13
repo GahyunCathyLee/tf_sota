@@ -43,6 +43,8 @@ def detect_adapter(config: Path) -> str:
     adapter = raw.get("adapter")
     if adapter:
         return str(adapter)
+    if "/par/" in str(config).replace("\\", "/"):
+        return "par"
     if "/simpl/" in str(config).replace("\\", "/"):
         return "simpl"
     return "qcnet"
@@ -55,6 +57,8 @@ def main(argv: list[str] | None = None) -> int:
     adapter = detect_adapter(known.config)
     if adapter == "simpl":
         from adapters.simpl.train import main as adapter_main
+    elif adapter == "par":
+        from adapters.par.train import main as adapter_main
     elif adapter == "qcnet":
         from adapters.qcnet.train import main as adapter_main
     else:

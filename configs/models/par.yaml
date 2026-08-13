@@ -2,18 +2,71 @@ model: par
 display_name: "PAR"
 upstream_dir: "external/par"
 adapter_dir: "adapters/par"
+
+exp_tag: ""
+
+data:
+  # PAR-specific preprocessing writes/links the canonical arrays plus
+  # fixed-neighbour future labels under data/par/<dataset>/dimI.
+  root: data/par
+  hz: 3.0
+  scenario_labels: "data/{dataset}/dimI/scenario_labels.csv"
+
 input:
-  coordinate_frame: "scene_or_agent_centric"
+  coordinate_frame: "ego_centric"
   uses_map: false
   ego_channels: 6
   neighbor_baseline_channels: 6
   raw_neighbor_channels: 10
   neighbor_dimI_channels: 8
+
 training:
-  batch_size: 128
+  # Matched to configs/models/mtp_go.yaml for the experiment matrix.
+  batch_size: 1024
   epochs: 100
-  lr: 0.0003
-  accelerator: "gpu"
+  lr: 1.0e-4
+  weight_decay: 0.05
+  clip: 5.0
+  log_interval: 100
+  accelerator: "auto"
+  output_dir: ""
+  ckpt_dir: ""
+  tensorboard_dir: ""
+
+model_hparams:
+  acc_token_size: 13
+  velocity_bins: 128
+  use_agent_embedding: true
+  dropout_hidden: 0.0
+  dropout_attn: 0.0
+  transformer:
+    depth: 8
+    heads: 8
+    hsize: 128
+    isize: 128
+    max_position_embeddings: 4098
+
+runtime:
+  seed: 42
+  n_workers: 24
+  dt: 0.32
+
+smoke:
+  epochs: 4
+  batch_size: 32
+  lr: 1.0e-3
+  train_samples: 2048
+  eval_samples: 1024
+  num_workers: 0
+  model_hparams:
+    transformer:
+      depth: 2
+      heads: 4
+      hsize: 64
+      isize: 128
+
 notes:
   - "Official code includes a NuScenes car trajectory task using xy trajectories."
-  - "Implement highD/exiD datamodule and decide whether dim/I are continuous side features or tokens."
+  - "Run data/par/preprocess.py to add fixed-ID neighbour futures without modifying ../neighformer."
+  - "If y_nb.npy is absent, the adapter falls back to ego-only future loss."
+  - "dim and I are continuous side-channel embeddings attached to neighbour token embeddings in dimI mode."

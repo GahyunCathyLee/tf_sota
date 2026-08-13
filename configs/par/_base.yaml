@@ -1,0 +1,13 @@
+# Shared base for the PAR seed sweep.
+#
+# Per-run files intentionally match configs/mtp_go/*.yaml: only dataset,
+# feature_mode, exp_tag and seed change between runs. Shared PAR hyperparameters
+# live in configs/models/par.yaml.
+
+base: ../models/par.yaml
+
+training:
+  output_dir: "runs/par/{dataset}/{feature_mode}/{exp_tag}"
+  ckpt_dir: "ckpts/par"
+  tensorboard_dir: "tensorboard/par"
+

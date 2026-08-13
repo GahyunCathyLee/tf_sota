@@ -1,0 +1,11 @@
+# PAR | highD | baseline | seed 42
+#   python adapters/par/train.py --config configs/par/highD0-1.yaml --mode full
+base: _base.yaml
+
+exp_tag: highD0-1
+dataset: highD
+feature_mode: baseline
+
+runtime:
+  seed: 42
+
