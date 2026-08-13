@@ -366,8 +366,9 @@ def main(argv: list[str] | None = None) -> int:
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     log_path = output_dir / "train.log"
 
-    def log(msg: str) -> None:
-        print(msg)
+    def log(msg: str, console: bool = True) -> None:
+        if console:
+            print(msg)
         with log_path.open("a", encoding="utf-8") as f:
             f.write(msg + "\n")
 
@@ -386,7 +387,7 @@ def main(argv: list[str] | None = None) -> int:
         total_loss = 0.0
         total_tokens = 0
         n_batches = 0
-        for step, raw in enumerate(train_loader, start=1):
+        for raw in train_loader:
             batch = move_batch(raw, device)
             loss, parts = model.loss(batch)
             optimizer.zero_grad(set_to_none=True)
@@ -396,16 +397,15 @@ def main(argv: list[str] | None = None) -> int:
             total_loss += float(loss.detach())
             total_tokens += int(parts["tokens_supervised"])
             n_batches += 1
-            if int(cfg["log_interval"]) > 0 and step % int(cfg["log_interval"]) == 0:
-                log(f"epoch={epoch:03d} step={step:05d} loss={total_loss / max(1, n_batches):.4f}")
 
         train_loss = total_loss / max(1, n_batches)
         last_val = evaluate_model(model, val_loader, val_ds, device, cfg)
+        is_best = last_val["ade"] < best_score
         log(
             f"Epoch {epoch:03d}/{int(cfg['epochs'])} "
             f"loss={train_loss:.4f} val_loss={last_val['loss']:.4f} "
             f"ADE={last_val['ade']:.3f} FDE={last_val['fde']:.3f} RMSE={last_val['rmse']:.3f} "
-            f"tokens={total_tokens}"
+            f"tokens={total_tokens} best={'*' if is_best else '-'}"
         )
         ckpt = {
             "epoch": epoch,
@@ -418,12 +418,12 @@ def main(argv: list[str] | None = None) -> int:
             "upstream_commit": upstream_commit(upstream_dir),
         }
         torch.save(ckpt, ckpt_dir / "last.pt")
-        if last_val["ade"] < best_score:
+        if is_best:
             best_score = float(last_val["ade"])
             ckpt["best_score"] = best_score
             torch.save(ckpt, ckpt_dir / "best.pt")
             (output_dir / "metrics.json").write_text(json.dumps(last_val, indent=2), encoding="utf-8")
-            log(f"  best saved -> {ckpt_dir / 'best.pt'}")
+            log(f"best saved at epoch {epoch:03d} -> {ckpt_dir / 'best.pt'}", console=False)
 
     print_metrics(last_val)
     log(f"[DONE] best ADE={best_score:.4f}")
