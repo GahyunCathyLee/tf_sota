@@ -11,6 +11,13 @@ import torch
 from torch.utils.data import Dataset
 
 from adapters.common import feature_mode_indices, feature_mode_names
+from adapters.simpl.lane_graph import (
+    empty_graph,
+    graph_from_segments,
+    load_cache,
+    rotate_to_heading,
+    translate_to_origin,
+)
 
 
 def _get_cos(v1: torch.Tensor, v2: torch.Tensor) -> torch.Tensor:
@@ -48,6 +55,9 @@ class NeighFormerSIMPLDataset(Dataset):
         feature_mode: str,
         split: str,
         lane_half_length: float = 120.0,
+        lane_cache_root: str | Path | None = None,
+        lane_radius: float = 120.0,
+        lane_max_segments: int = 192,
     ) -> None:
         self.data_dir = Path(data_dir)
         self.sample_indices = np.asarray(indices, dtype=np.int64)
@@ -55,10 +65,17 @@ class NeighFormerSIMPLDataset(Dataset):
         self.feature_mode = feature_mode
         self.split = split
         self.lane_half_length = float(lane_half_length)
+        self.lane_cache_root = Path(lane_cache_root) if lane_cache_root else None
+        self.lane_radius = float(lane_radius)
+        self.lane_max_segments = int(lane_max_segments)
         self.nb_feature_indices = np.asarray(feature_mode_indices(feature_mode), dtype=np.int64)
         self.nb_feature_names = feature_mode_names(feature_mode)
         self.actor_feature_dim = len(self.nb_feature_indices)
         self._arrays: dict[str, np.ndarray] | None = None
+        self._recording_cache: dict[int, dict[str, Any] | None] = {}
+        self._warned_lane_cache = False
+        self._ref_heading: np.ndarray | None = None
+        self._location_id: np.ndarray | None = None
 
         x_ego = np.load(self.data_dir / "x_ego.npy", mmap_mode="r")
         x_nb = np.load(self.data_dir / "x_nb.npy", mmap_mode="r")
@@ -74,6 +91,22 @@ class NeighFormerSIMPLDataset(Dataset):
                 f"x_nb has {x_nb.shape[3]} channels; {feature_mode} needs "
                 f"index {int(self.nb_feature_indices.max())}"
             )
+        self._load_sample_pose_cache()
+
+    def _load_sample_pose_cache(self) -> None:
+        if self.dataset_name != "exiD" or self.lane_cache_root is None:
+            return
+        candidates = [
+            self.lane_cache_root / f"sample_pose_{self.data_dir.name}.npz",
+            self.lane_cache_root / f"sample_pose_{self.feature_mode}.npz",
+            self.lane_cache_root / "sample_pose.npz",
+        ]
+        pose_path = next((p for p in candidates if p.exists()), None)
+        if pose_path is None:
+            return
+        pose = np.load(pose_path, mmap_mode="r")
+        self._ref_heading = pose["ref_heading"]
+        self._location_id = pose["location_id"] if "location_id" in pose.files else None
 
     def _ensure_open(self) -> dict[str, np.ndarray]:
         if self._arrays is None:
@@ -83,7 +116,7 @@ class NeighFormerSIMPLDataset(Dataset):
                 "nb_mask": np.load(self.data_dir / "nb_mask.npy", mmap_mode="r"),
                 "y": np.load(self.data_dir / "y.npy", mmap_mode="r"),
             }
-            for name in ("meta_recordingId", "meta_trackId", "meta_frame"):
+            for name in ("meta_recordingId", "meta_trackId", "meta_frame", "x_last_abs"):
                 p = self.data_dir / f"{name}.npy"
                 if p.exists():
                     arrays[name] = np.load(p, mmap_mode="r")
@@ -141,7 +174,7 @@ class NeighFormerSIMPLDataset(Dataset):
         pad_fut = np.zeros((n_agents, tf), dtype=np.float32)
         pad_fut[0] = 1.0
 
-        graph = self._pseudo_lane_graph()
+        graph = self._lane_graph(real_idx, arrays)
         scene_ctrs = torch.cat([torch.from_numpy(centers), torch.from_numpy(graph["lane_ctrs"])], dim=0)
         scene_vecs = torch.cat([torch.from_numpy(vecs), torch.from_numpy(graph["lane_vecs"])], dim=0)
         rpe = build_rpe(scene_ctrs, scene_vecs)
@@ -165,28 +198,64 @@ class NeighFormerSIMPLDataset(Dataset):
             "RPE": rpe,
         }
 
+    def _warn_lane_cache_once(self, message: str) -> None:
+        if not self._warned_lane_cache:
+            print(f"[WARN] SIMPL lane graph fallback: {message}")
+            self._warned_lane_cache = True
+
     def _pseudo_lane_graph(self) -> dict[str, np.ndarray | int]:
-        l = self.lane_half_length
-        n_lanes, n_points = 1, 10
-        xs = np.linspace(-l, l, n_points, dtype=np.float32)
-        node_ctrs = np.stack([xs, np.zeros_like(xs)], axis=-1)[None]
-        step = np.full_like(xs, 2 * l / max(1, n_points - 1))
-        node_vecs = np.stack([step, np.zeros_like(step)], axis=-1)[None]
-        zeros2 = np.zeros((n_lanes, n_points, 2), dtype=np.float32)
-        zeros = np.zeros((n_lanes, n_points), dtype=np.float32)
-        return {
-            "node_ctrs": node_ctrs,
-            "node_vecs": node_vecs,
-            "turn": zeros2.copy(),
-            "control": zeros.copy(),
-            "intersect": zeros.copy(),
-            "left": zeros.copy(),
-            "right": zeros.copy(),
-            "lane_ctrs": np.array([[0.0, 0.0]], dtype=np.float32),
-            "lane_vecs": np.array([[1.0, 0.0]], dtype=np.float32),
-            "num_nodes": n_points,
-            "num_lanes": n_lanes,
-        }
+        return empty_graph(self.lane_half_length)
+
+    def _load_recording_cache(self, recording_id: int) -> dict[str, Any] | None:
+        if recording_id in self._recording_cache:
+            return self._recording_cache[recording_id]
+        if self.lane_cache_root is None:
+            self._recording_cache[recording_id] = None
+            return None
+        candidates = [
+            self.lane_cache_root / f"recording_{recording_id:02d}.pkl",
+            self.lane_cache_root / f"recording_{recording_id}.pkl",
+        ]
+        path = next((p for p in candidates if p.exists()), None)
+        if path is None:
+            self._recording_cache[recording_id] = None
+            return None
+        cache = load_cache(path)
+        self._recording_cache[recording_id] = cache
+        return cache
+
+    def _lane_graph(self, real_idx: int, arrays: dict[str, np.ndarray]) -> dict[str, np.ndarray | int]:
+        if self.lane_cache_root is None:
+            return self._pseudo_lane_graph()
+        if "meta_recordingId" not in arrays or "x_last_abs" not in arrays:
+            self._warn_lane_cache_once("meta_recordingId.npy or x_last_abs.npy is missing")
+            return self._pseudo_lane_graph()
+        recording_id = int(arrays["meta_recordingId"][real_idx])
+        cache = self._load_recording_cache(recording_id)
+        if cache is None:
+            self._warn_lane_cache_once(f"cache for recording {recording_id} was not found in {self.lane_cache_root}")
+            return self._pseudo_lane_graph()
+        ref_x, ref_y = np.asarray(arrays["x_last_abs"][real_idx], dtype=np.float32)
+        segments = np.asarray(cache.get("segments", np.zeros((0, 11, 2), dtype=np.float32)), dtype=np.float32)
+        left = np.asarray(cache.get("left", np.zeros((segments.shape[0],), dtype=np.float32)), dtype=np.float32)
+        right = np.asarray(cache.get("right", np.zeros((segments.shape[0],), dtype=np.float32)), dtype=np.float32)
+        if self.dataset_name == "exiD":
+            if self._ref_heading is None:
+                self._warn_lane_cache_once("exiD sample_pose cache with ref_heading is missing")
+                return self._pseudo_lane_graph()
+            heading = float(self._ref_heading[real_idx])
+            transform = lambda points: rotate_to_heading(points, float(ref_x), float(ref_y), heading)
+        else:
+            transform = lambda points: translate_to_origin(points, float(ref_x), float(ref_y))
+        return graph_from_segments(
+            segments,
+            transform,
+            left,
+            right,
+            radius=self.lane_radius,
+            max_segments=self.lane_max_segments,
+            fallback_half_length=self.lane_half_length,
+        )
 
     def collate_fn(self, batch: list[dict[str, Any]]) -> dict[str, Any]:
         data: dict[str, Any] = {"BATCH_SIZE": len(batch)}
@@ -250,7 +319,11 @@ class NeighFormerSIMPLDataset(Dataset):
             "actor_feature_dim": self.actor_feature_dim,
             "neighbor_indices": [int(v) for v in self.nb_feature_indices],
             "neighbor_names": self.nb_feature_names,
-            "pseudo_lanes_per_sample": 1,
+            "lane_cache_root": str(self.lane_cache_root) if self.lane_cache_root else None,
+            "lane_radius": self.lane_radius,
+            "lane_max_segments": self.lane_max_segments,
+            "uses_real_lane_graph": bool(self.lane_cache_root and self.lane_cache_root.exists()),
+            "exid_sample_pose": bool(self._ref_heading is not None),
         }
 
     def channel_stats(self, n_samples: int = 256) -> dict[str, Any]:

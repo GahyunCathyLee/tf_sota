@@ -36,6 +36,9 @@ training:
   tensorboard_dir: tensorboard/simpl
   output_dir: runs/simpl/{dataset}/{feature_mode}/{exp_tag}
   lane_half_length: 120.0
+  lane_cache_root: "{data_root}/{dataset}/simpl_lane_graph"
+  lane_radius: 120.0
+  lane_max_segments: 192
   upstream_dir: external/simpl
 
 runtime:

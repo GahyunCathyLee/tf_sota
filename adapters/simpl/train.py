@@ -47,6 +47,9 @@ DEFAULTS: dict[str, Any] = {
     "tensorboard_dir": "tensorboard/simpl",
     "output_dir": "runs/simpl/{dataset}/{feature_mode}/{exp_tag}",
     "lane_half_length": 120.0,
+    "lane_cache_root": "{data_root}/{dataset}/simpl_lane_graph",
+    "lane_radius": 120.0,
+    "lane_max_segments": 192,
     "max_train_samples": None,
     "max_eval_samples": None,
     "upstream_dir": "external/simpl",
@@ -71,6 +74,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--lr", type=float)
     p.add_argument("--max-train-samples", type=int)
     p.add_argument("--max-eval-samples", type=int)
+    p.add_argument("--lane-cache-root", type=Path)
+    p.add_argument("--lane-radius", type=float)
+    p.add_argument("--lane-max-segments", type=int)
     p.add_argument("--upstream-dir", type=Path)
     p.add_argument("--check-data", action="store_true")
     return p.parse_args(argv)
@@ -137,6 +143,9 @@ def apply_cli(cfg: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]:
         ("lr", "lr"),
         ("max_train_samples", "max_train_samples"),
         ("max_eval_samples", "max_eval_samples"),
+        ("lane_cache_root", "lane_cache_root"),
+        ("lane_radius", "lane_radius"),
+        ("lane_max_segments", "lane_max_segments"),
         ("upstream_dir", "upstream_dir"),
     ):
         value = getattr(args, cli_name)
@@ -155,7 +164,14 @@ def resolve_path(path: str | Path) -> Path:
 
 
 def format_path_template(value: str | Path, cfg: dict[str, Any]) -> Path:
-    return resolve_path(str(value).format(dataset=cfg["dataset"], feature_mode=cfg["feature_mode"], exp_tag=cfg["exp_tag"]))
+    return resolve_path(
+        str(value).format(
+            dataset=cfg["dataset"],
+            feature_mode=cfg["feature_mode"],
+            exp_tag=cfg["exp_tag"],
+            data_root=cfg["data_root"],
+        )
+    )
 
 
 def set_seed(seed: int) -> None:
@@ -253,10 +269,31 @@ def main(argv: list[str] | None = None) -> int:
 
     data_root = resolve_path(cfg["data_root"])
     data_path = dataset_dir(data_root, cfg["dataset"])
+    lane_cache_root = format_path_template(cfg["lane_cache_root"], cfg) if cfg.get("lane_cache_root") else None
     train_idx = subset_indices(np.load(split_indices_path(data_root, cfg["dataset"], "train")), cfg.get("max_train_samples"))
     val_idx = subset_indices(np.load(split_indices_path(data_root, cfg["dataset"], "val")), cfg.get("max_eval_samples"))
-    train_ds = NeighFormerSIMPLDataset(data_path, train_idx, cfg["dataset"], cfg["feature_mode"], "train", cfg["lane_half_length"])
-    val_ds = NeighFormerSIMPLDataset(data_path, val_idx, cfg["dataset"], cfg["feature_mode"], "val", cfg["lane_half_length"])
+    train_ds = NeighFormerSIMPLDataset(
+        data_path,
+        train_idx,
+        cfg["dataset"],
+        cfg["feature_mode"],
+        "train",
+        cfg["lane_half_length"],
+        lane_cache_root=lane_cache_root,
+        lane_radius=cfg["lane_radius"],
+        lane_max_segments=cfg["lane_max_segments"],
+    )
+    val_ds = NeighFormerSIMPLDataset(
+        data_path,
+        val_idx,
+        cfg["dataset"],
+        cfg["feature_mode"],
+        "val",
+        cfg["lane_half_length"],
+        lane_cache_root=lane_cache_root,
+        lane_radius=cfg["lane_radius"],
+        lane_max_segments=cfg["lane_max_segments"],
+    )
 
     output_dir = format_path_template(cfg["output_dir"], cfg)
     ckpt_dir = format_path_template(cfg["ckpt_dir"], cfg) / cfg["exp_tag"]
@@ -284,6 +321,7 @@ def main(argv: list[str] | None = None) -> int:
     print("====== SIMPL Train ======")
     print(f"upstream : {upstream_dir} ({upstream_commit(upstream_dir)})")
     print(f"data     : {data_path}")
+    print(f"lanes    : {lane_cache_root if lane_cache_root else 'pseudo fallback'}")
     print(f"samples  : train={len(train_ds):,} val={len(val_ds):,}")
     print(f"device   : {device}")
     print(f"ckpt     : {ckpt_dir}")

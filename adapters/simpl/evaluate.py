@@ -43,6 +43,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--scenario", action="store_true")
     p.add_argument("--scenario-labels", type=Path)
     p.add_argument("--max-samples", type=int)
+    p.add_argument("--lane-cache-root", type=Path)
+    p.add_argument("--lane-radius", type=float)
+    p.add_argument("--lane-max-segments", type=int)
     p.add_argument("--measure-time", action="store_true")
     p.add_argument("--warmup", type=int, default=1000)
     p.add_argument("--iters", type=int, default=10000)
@@ -111,11 +114,23 @@ def main(argv: list[str] | None = None) -> int:
     device = torch.device(args.device) if args.device else torch.device("cuda" if torch.cuda.is_available() else "cpu")
     data_root = resolve_path(args.data_root) if args.data_root else resolve_path(cfg["data_root"])
     data_path = dataset_dir(data_root, cfg["dataset"])
+    lane_cache_value = args.lane_cache_root or cfg.get("lane_cache_root")
+    lane_cache_root = resolve_path(str(lane_cache_value).format(**cfg)) if lane_cache_value else None
     indices = np.load(split_indices_path(data_root, cfg["dataset"], args.split))
     if args.max_samples is not None:
         indices = indices[: args.max_samples]
     ds = NeighFormerSIMPLDataset(
-        data_path, indices, cfg["dataset"], cfg["feature_mode"], args.split, cfg["lane_half_length"]
+        data_path,
+        indices,
+        cfg["dataset"],
+        cfg["feature_mode"],
+        args.split,
+        cfg["lane_half_length"],
+        lane_cache_root=lane_cache_root,
+        lane_radius=args.lane_radius if args.lane_radius is not None else cfg.get("lane_radius", 120.0),
+        lane_max_segments=args.lane_max_segments
+        if args.lane_max_segments is not None
+        else cfg.get("lane_max_segments", 192),
     )
     batch_size = args.batch_size or int(cfg["batch_size"])
     num_workers = args.num_workers if args.num_workers is not None else int(cfg["num_workers"])
@@ -127,6 +142,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"[INFO] Checkpoint : {ckpt_path}  (epoch {ckpt.get('epoch', '?')})")
     print(f"[INFO] Upstream   : {upstream_dir}")
     print(f"[INFO] Dataset    : {args.split} split  n={len(ds):,}  {cfg['dataset']} {cfg['feature_mode']}")
+    print(f"[INFO] Lanes      : {lane_cache_root if lane_cache_root else 'pseudo fallback'}")
     gpu = f"  ({torch.cuda.get_device_name(0)})" if device.type == "cuda" else ""
     print(f"[INFO] Device     : {device}{gpu}")
 
