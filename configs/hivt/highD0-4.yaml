@@ -1,5 +1,5 @@
-# QCNet | highD | baseline | seed 0
-base: qcnet/_base.yaml
+# HiVT | highD | baseline | seed 0
+base: _base.yaml
 exp_tag: highD0-4
 dataset: highD
 feature_mode: baseline

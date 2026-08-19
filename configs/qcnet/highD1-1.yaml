@@ -1,7 +1,9 @@
 # QCNet | highD | dimI | seed 42
-base: qcnet/_base.yaml
+base: _base.yaml
+
 exp_tag: highD1-1
 dataset: highD
 feature_mode: dimI
+
 runtime:
   seed: 42

@@ -19,6 +19,8 @@ def detect_adapter(ckpt_path: Path) -> str:
     adapter = cfg.get("adapter")
     if adapter:
         return str(adapter)
+    if "/hivt/" in str(path).replace("\\", "/"):
+        return "hivt"
     if "/par/" in str(path).replace("\\", "/"):
         return "par"
     if "model_cfg" in ckpt or "/simpl/" in str(path).replace("\\", "/"):
@@ -31,7 +33,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--ckpt", required=True, type=Path)
     known, _ = parser.parse_known_args(argv)
     adapter = detect_adapter(known.ckpt)
-    if adapter == "simpl":
+    if adapter == "hivt":
+        from adapters.hivt.evaluate import main as adapter_main
+    elif adapter == "simpl":
         from adapters.simpl.evaluate import main as adapter_main
     elif adapter == "par":
         from adapters.par.evaluate import main as adapter_main

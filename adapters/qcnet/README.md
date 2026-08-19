@@ -21,13 +21,13 @@ Repo-root `train.py` and `evaluate.py` dispatch to this adapter, so Colab can
 use the same command style as NeighFormer:
 
 ```bash
-python train.py --config configs/exiD1-4.yaml
+python train.py --config configs/qcnet/exiD1-4.yaml
 python evaluate.py --ckpt ckpts/qcnet/exiD1-4/best.pt --scenario
 ```
 
 ## Configs
 
-`configs/highD0-1.yaml` ... `configs/exiD1-5.yaml` mirror NeighFormer naming:
+`configs/qcnet/highD0-1.yaml` ... `configs/qcnet/exiD1-5.yaml` mirror NeighFormer naming:
 
 - feature `0` = baseline (`dx,dy,dvx,dvy,dax,day`)
 - feature `1` = dimI (`dx,dy,dvx,dvy,dax,day,dim,I`)
@@ -46,9 +46,16 @@ For `dimI`, the adapter replaces QCNet's official agent encoder with an
 equivalent adapter subclass whose agent-token Fourier input is extended from
 4 continuous values to 6: the original motion features plus `[dim, I]`.
 
-highD/exiD do not provide lane maps. The adapter adds a simple pseudo-lane token
-per sample so QCNet's map attention path remains valid; this is a deliberate
-adapter approximation, not a recovered road graph.
+For highD, the adapter reads SIMPL lane graph caches from
+`<data-root>/highD/simpl_lane_graph` and converts nearby lane segments to
+QCNet's `map_polygon`/`map_point` schema. Build that cache with:
+
+```bash
+python scripts/build_simpl_lane_graph.py --dataset highD --data-root /path/to/data
+```
+
+If the cache is missing, or for exiD, the adapter falls back to the original
+single pseudo-lane token so QCNet's map attention path remains valid.
 
 ## Dependencies
 
@@ -66,5 +73,5 @@ pip install -q torch-geometric
 Data-only validation can be run without importing the QCNet model:
 
 ```bash
-python train.py --config configs/exiD1-4.yaml --check-data
+python train.py --config configs/qcnet/exiD1-4.yaml --check-data
 ```

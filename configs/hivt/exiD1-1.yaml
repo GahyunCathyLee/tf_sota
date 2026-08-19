@@ -1,5 +1,5 @@
-# QCNet | exiD | dimI | seed 42
-base: qcnet/_base.yaml
+# HiVT | exiD | dimI | seed 42
+base: _base.yaml
 exp_tag: exiD1-1
 dataset: exiD
 feature_mode: dimI

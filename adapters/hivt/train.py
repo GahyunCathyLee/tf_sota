@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Train official QCNet on NeighFormer highD/exiD npy data."""
+"""Train official HiVT on NeighFormer highD/exiD npy data."""
 
 from __future__ import annotations
 
@@ -20,17 +20,18 @@ EXPERIMENT_ROOT = ADAPTER_DIR.parents[1]
 sys.path.insert(0, str(EXPERIMENT_ROOT))
 
 from adapters.common import dataset_dir, split_indices_path  # noqa: E402
-from adapters.qcnet.dataset import NeighFormerQCNetDataset  # noqa: E402
-from adapters.qcnet.upstream import add_upstream_to_path, upstream_commit  # noqa: E402
+from adapters.hivt.dataset import NeighFormerHiVTDataset  # noqa: E402
+from adapters.hivt.upstream import add_upstream_to_path, upstream_commit  # noqa: E402
 
 
 DEFAULTS: dict[str, Any] = {
+    "adapter": "hivt",
     "dataset": "",
     "feature_mode": "",
     "exp_tag": "",
     "data_root": "data",
     "eval_hz": 3.0,
-    "batch_size": 32,
+    "batch_size": 128,
     "num_workers": 4,
     "pin_memory": True,
     "persistent_workers": True,
@@ -38,29 +39,43 @@ DEFAULTS: dict[str, Any] = {
     "accelerator": "auto",
     "devices": 1,
     "epochs": 100,
-    "ckpt_dir": "ckpts/qcnet",
-    "tensorboard_dir": "tensorboard/qcnet",
-    "output_dir": "runs/qcnet/{dataset}/{feature_mode}/{exp_tag}",
+    "ckpt_dir": "ckpts/hivt",
+    "tensorboard_dir": "tensorboard/hivt",
+    "output_dir": "runs/hivt/{dataset}/{feature_mode}/{exp_tag}",
     "lane_half_length": 120.0,
     "lane_cache_root": "{data_root}/{dataset}/simpl_lane_graph",
     "lane_radius": 120.0,
     "lane_max_segments": 192,
     "max_train_samples": None,
     "max_eval_samples": None,
-    "upstream_dir": "external/qcnet",
+    "upstream_dir": "external/hivt",
+    "model_hparams": {},
+    "smoke": {
+        "epochs": 2,
+        "batch_size": 16,
+        "train_samples": 512,
+        "eval_samples": 256,
+        "model_hparams": {
+            "embed_dim": 32,
+            "num_heads": 4,
+            "num_temporal_layers": 1,
+            "num_global_layers": 1,
+        },
+    },
 }
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--config", required=True, type=Path)
+    p.add_argument("--mode", default="smoke", choices=["smoke", "full", "check-data"])
     p.add_argument("--dataset", choices=["highD", "exiD"])
     p.add_argument("--feature-mode", choices=["baseline", "dimI"])
     p.add_argument("--data-root", type=Path)
     p.add_argument("--ckpt-dir", type=Path)
     p.add_argument("--output-dir", type=Path)
     p.add_argument("--tensorboard-dir", type=Path)
-    p.add_argument("--exp-tag", type=str)
+    p.add_argument("--exp-tag")
     p.add_argument("--epochs", type=int)
     p.add_argument("--batch-size", type=int)
     p.add_argument("--num-workers", type=int)
@@ -106,32 +121,19 @@ def load_raw_config(path: Path, seen: tuple[Path, ...] = ()) -> dict[str, Any]:
 
 def load_config(path: Path) -> dict[str, Any]:
     raw = load_raw_config(path)
-    cfg = dict(DEFAULTS)
+    cfg = _deep_merge(DEFAULTS, {})
     for section in ("data", "training", "runtime"):
         block = raw.get(section)
         if isinstance(block, dict):
             for key, value in block.items():
-                mapped = {"root": "data_root", "hz": "eval_hz"}.get(key, key)
-                cfg[mapped] = value
-    cfg["model_hparams"] = raw.get("model", {})
+                cfg[{"root": "data_root", "hz": "eval_hz", "n_workers": "num_workers"}.get(key, key)] = value
+    cfg["model_hparams"] = raw.get("model", raw.get("model_hparams", {})) or {}
+    if isinstance(raw.get("smoke"), dict):
+        cfg["smoke"] = _deep_merge(cfg.get("smoke", {}), raw["smoke"])
     for key in ("adapter", "dataset", "feature_mode", "exp_tag"):
         if key in raw:
             cfg[key] = raw[key]
     return cfg
-
-
-def resolve_path(path: str | Path) -> Path:
-    p = Path(path).expanduser()
-    return p if p.is_absolute() else (EXPERIMENT_ROOT / p).resolve()
-
-
-def format_path_template(value: str | Path, cfg: dict[str, Any]) -> Path:
-    return resolve_path(str(value).format(
-        dataset=cfg["dataset"],
-        feature_mode=cfg["feature_mode"],
-        exp_tag=cfg["exp_tag"],
-        data_root=cfg["data_root"],
-    ))
 
 
 def apply_cli(cfg: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]:
@@ -139,6 +141,14 @@ def apply_cli(cfg: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]:
         cfg["dataset"] = args.dataset
     if args.feature_mode:
         cfg["feature_mode"] = args.feature_mode
+    mode = "check-data" if args.check_data else args.mode
+    if mode == "smoke":
+        smoke = cfg.get("smoke") or {}
+        for key, value in smoke.items():
+            if key == "model_hparams" and isinstance(value, dict):
+                cfg["model_hparams"] = _deep_merge(cfg.get("model_hparams", {}), value)
+            else:
+                cfg[{"train_samples": "max_train_samples", "eval_samples": "max_eval_samples"}.get(key, key)] = value
     for cli_name, cfg_name in (
         ("data_root", "data_root"),
         ("ckpt_dir", "ckpt_dir"),
@@ -165,7 +175,24 @@ def apply_cli(cfg: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]:
         raise SystemExit("dataset and feature_mode must be set by config or CLI")
     if not cfg["exp_tag"]:
         cfg["exp_tag"] = f"{cfg['dataset']}{1 if cfg['feature_mode'] == 'dimI' else 0}"
+    cfg["mode"] = mode
     return cfg
+
+
+def resolve_path(path: str | Path) -> Path:
+    p = Path(path).expanduser()
+    return p if p.is_absolute() else (EXPERIMENT_ROOT / p).resolve()
+
+
+def format_path_template(value: str | Path, cfg: dict[str, Any]) -> Path:
+    return resolve_path(
+        str(value).format(
+            dataset=cfg["dataset"],
+            feature_mode=cfg["feature_mode"],
+            exp_tag=cfg["exp_tag"],
+            data_root=cfg["data_root"],
+        )
+    )
 
 
 def set_seed(seed: int) -> None:
@@ -176,66 +203,37 @@ def set_seed(seed: int) -> None:
         torch.cuda.manual_seed_all(seed)
 
 
-def make_progress_bar(train_loader: Any) -> Any:
-    """Keep the training bar, but silence validation/sanity-check bars."""
-    from pytorch_lightning.callbacks import TQDMProgressBar
-    from pytorch_lightning.callbacks.progress.tqdm_progress import Tqdm
-
-    class TrainOnlyProgressBar(TQDMProgressBar):
-        @staticmethod
-        def _silent() -> Tqdm:
-            return Tqdm(disable=True)
-
-        def init_validation_tqdm(self) -> Tqdm:
-            return self._silent()
-
-        def init_sanity_tqdm(self) -> Tqdm:
-            return self._silent()
-
-    if sys.stdout.isatty():
-        return TrainOnlyProgressBar()
-    return TrainOnlyProgressBar(refresh_rate=max(1, len(train_loader) // 10))
-
-
 def subset_indices(indices: np.ndarray, limit: int | None) -> np.ndarray:
     return indices if limit is None else indices[: int(limit)]
 
 
-def build_model_args(cfg: dict[str, Any]) -> dict[str, Any]:
+def build_model_args(cfg: dict[str, Any], ds: NeighFormerHiVTDataset) -> dict[str, Any]:
     model = {
-        "dataset": "argoverse_v2",
-        "input_dim": 2,
-        "hidden_dim": 64,
-        "output_dim": 2,
-        "output_head": False,
-        "num_historical_steps": 6,
-        "num_future_steps": 15,
+        "historical_steps": ds.history_len,
+        "future_steps": ds.future_len,
         "num_modes": 6,
-        "num_recurrent_steps": 3,
-        "num_freq_bands": 32,
-        "num_map_layers": 1,
-        "num_agent_layers": 2,
-        "num_dec_layers": 2,
+        "rotate": False,
+        "node_dim": ds.node_dim,
+        "edge_dim": ds.edge_dim,
+        "embed_dim": 64,
         "num_heads": 4,
-        "head_dim": 16,
         "dropout": 0.1,
-        "pl2pl_radius": 150.0,
-        "time_span": 6,
-        "pl2a_radius": 150.0,
-        "a2a_radius": 150.0,
-        "num_t2m_steps": 6,
-        "pl2m_radius": 150.0,
-        "a2m_radius": 150.0,
+        "num_temporal_layers": 2,
+        "num_global_layers": 2,
+        "local_radius": 50.0,
+        "parallel": False,
         "lr": 5.0e-4,
         "weight_decay": 1.0e-4,
         "T_max": int(cfg["epochs"]),
-        "submission_dir": "./",
-        "submission_file_name": "submission",
     }
     model.update(cfg.get("model_hparams") or {})
-    model["num_historical_steps"] = 6
-    model["num_future_steps"] = 15
+    model["historical_steps"] = ds.history_len
+    model["future_steps"] = ds.future_len
+    model["node_dim"] = ds.node_dim
+    model["edge_dim"] = ds.edge_dim
     model["T_max"] = int(model.get("T_max") or cfg["epochs"])
+    if model["rotate"] and model["node_dim"] != 2:
+        raise SystemExit("HiVT rotate=True is only compatible with node_dim=2; use rotate: false for baseline/dimI.")
     return model
 
 
@@ -261,14 +259,13 @@ def main(argv: list[str] | None = None) -> int:
     set_seed(int(cfg["seed"]))
 
     data_root = resolve_path(cfg["data_root"])
+    cfg["data_root"] = str(data_root)
     data_path = dataset_dir(data_root, cfg["dataset"])
-    train_idx = np.load(split_indices_path(data_root, cfg["dataset"], "train"))
-    val_idx = np.load(split_indices_path(data_root, cfg["dataset"], "val"))
-    train_idx = subset_indices(train_idx, cfg.get("max_train_samples"))
-    val_idx = subset_indices(val_idx, cfg.get("max_eval_samples"))
+    train_idx = subset_indices(np.load(split_indices_path(data_root, cfg["dataset"], "train")), cfg.get("max_train_samples"))
+    val_idx = subset_indices(np.load(split_indices_path(data_root, cfg["dataset"], "val")), cfg.get("max_eval_samples"))
     lane_cache_root = format_path_template(cfg["lane_cache_root"], cfg) if cfg.get("lane_cache_root") else None
 
-    train_ds = NeighFormerQCNetDataset(
+    train_ds = NeighFormerHiVTDataset(
         data_path,
         train_idx,
         cfg["dataset"],
@@ -279,7 +276,7 @@ def main(argv: list[str] | None = None) -> int:
         lane_radius=cfg["lane_radius"],
         lane_max_segments=cfg["lane_max_segments"],
     )
-    val_ds = NeighFormerQCNetDataset(
+    val_ds = NeighFormerHiVTDataset(
         data_path,
         val_idx,
         cfg["dataset"],
@@ -300,7 +297,7 @@ def main(argv: list[str] | None = None) -> int:
 
     data_report = {"train": train_ds.describe(), "val": val_ds.describe(), "channels": train_ds.channel_stats()}
     (output_dir / "data_report.json").write_text(json.dumps(data_report, indent=2), encoding="utf-8")
-    if args.check_data:
+    if cfg["mode"] == "check-data":
         print(json.dumps(data_report, indent=2))
         return 0
 
@@ -309,19 +306,10 @@ def main(argv: list[str] | None = None) -> int:
         from pytorch_lightning.callbacks import LearningRateMonitor, ModelCheckpoint
         from torch_geometric.loader import DataLoader
     except ImportError as exc:
-        raise SystemExit(
-            "QCNet dependencies are missing. Install PyTorch Geometric, torch_cluster, "
-            "torch_scatter, torchvision, and pytorch_lightning before training."
-        ) from exc
+        raise SystemExit("HiVT dependencies are missing: pytorch_lightning and torch_geometric are required.") from exc
 
     upstream_dir = add_upstream_to_path(cfg["upstream_dir"])
-    try:
-        from adapters.qcnet.model import build_qcnet
-    except ImportError as exc:
-        raise SystemExit(
-            "Could not import the official QCNet model. Install the upstream dependencies first, "
-            "notably torchvision plus PyG extension packages torch_cluster and torch_scatter."
-        ) from exc
+    from models.hivt import HiVT  # noqa: WPS433
 
     loader_kwargs = {
         "batch_size": int(cfg["batch_size"]),
@@ -332,13 +320,12 @@ def main(argv: list[str] | None = None) -> int:
     train_loader = DataLoader(train_ds, shuffle=True, drop_last=True, **loader_kwargs)
     val_loader = DataLoader(val_ds, shuffle=False, drop_last=False, **loader_kwargs)
 
-    model_args = build_model_args(cfg)
-    model = build_qcnet(model_args, cfg["feature_mode"])
+    model_args = build_model_args(cfg, train_ds)
+    model = HiVT(**model_args)
     callbacks = [
         ModelCheckpoint(dirpath=str(ckpt_dir), filename="lightning-best", monitor="val_minFDE", mode="min",
                         save_top_k=1, save_last=True),
         LearningRateMonitor(logging_interval="epoch"),
-        make_progress_bar(train_loader),
     ]
     trainer = pl.Trainer(
         accelerator=str(cfg["accelerator"]),
@@ -349,11 +336,12 @@ def main(argv: list[str] | None = None) -> int:
         logger=True,
     )
 
-    print("====== QCNet Train ======")
+    print("====== HiVT Train ======")
     print(f"upstream : {upstream_dir} ({upstream_commit(upstream_dir)})")
     print(f"data     : {data_path}")
     print(f"lanes    : {lane_cache_root if lane_cache_root else 'pseudo fallback'}")
     print(f"samples  : train={len(train_ds):,} val={len(val_ds):,}")
+    print(f"node_dim : {train_ds.node_dim}")
     print(f"ckpt     : {ckpt_dir}")
     trainer.fit(model, train_loader, val_loader)
 

@@ -17,6 +17,7 @@ import torch
 from torch_geometric.data import Dataset, HeteroData
 
 from adapters.common import feature_mode_indices, feature_mode_names
+from adapters.simpl.lane_graph import load_cache
 
 
 def _wrap_angle(angle: torch.Tensor) -> torch.Tensor:
@@ -38,6 +39,9 @@ class NeighFormerQCNetDataset(Dataset):
         feature_mode: str,
         split: str,
         lane_half_length: float = 120.0,
+        lane_cache_root: str | Path | None = None,
+        lane_radius: float = 120.0,
+        lane_max_segments: int = 192,
     ) -> None:
         super().__init__(None, None, None)
         self.data_dir = Path(data_dir)
@@ -46,9 +50,14 @@ class NeighFormerQCNetDataset(Dataset):
         self.feature_mode = feature_mode
         self.split = split
         self.lane_half_length = float(lane_half_length)
+        self.lane_cache_root = Path(lane_cache_root) if lane_cache_root else None
+        self.lane_radius = float(lane_radius)
+        self.lane_max_segments = int(lane_max_segments)
         self.nb_feature_indices = np.asarray(feature_mode_indices(feature_mode), dtype=np.int64)
         self.nb_feature_names = feature_mode_names(feature_mode)
         self._arrays: dict[str, np.ndarray] | None = None
+        self._recording_cache: dict[int, dict[str, Any] | None] = {}
+        self._warned_lane_cache = False
 
         x_ego = np.load(self.data_dir / "x_ego.npy", mmap_mode="r")
         x_nb = np.load(self.data_dir / "x_nb.npy", mmap_mode="r")
@@ -76,6 +85,10 @@ class NeighFormerQCNetDataset(Dataset):
                 "nb_mask": np.load(self.data_dir / "nb_mask.npy", mmap_mode="r"),
                 "y": np.load(self.data_dir / "y.npy", mmap_mode="r"),
             }
+            for name in ("meta_recordingId", "x_last_abs"):
+                path = self.data_dir / f"{name}.npy"
+                if path.exists():
+                    arrays[name] = np.load(path, mmap_mode="r")
             if self.has_y_vel:
                 arrays["y_vel"] = np.load(self.data_dir / "y_vel.npy", mmap_mode="r")
             self._arrays = arrays
@@ -159,8 +172,118 @@ class NeighFormerQCNetDataset(Dataset):
         if attrs is not None:
             data["agent"]["attrs"] = attrs
 
-        self._add_pseudo_map(data)
+        self._add_map(data, real_idx, arrays)
         return data
+
+    def _warn_lane_cache_once(self, message: str) -> None:
+        if not self._warned_lane_cache:
+            print(f"[WARN] QCNet lane graph fallback: {message}")
+            self._warned_lane_cache = True
+
+    def _load_recording_cache(self, recording_id: int) -> dict[str, Any] | None:
+        if recording_id in self._recording_cache:
+            return self._recording_cache[recording_id]
+        if self.lane_cache_root is None:
+            self._recording_cache[recording_id] = None
+            return None
+        candidates = [
+            self.lane_cache_root / f"recording_{recording_id:02d}.pkl",
+            self.lane_cache_root / f"recording_{recording_id}.pkl",
+        ]
+        path = next((p for p in candidates if p.exists()), None)
+        if path is None:
+            self._recording_cache[recording_id] = None
+            return None
+        cache = load_cache(path)
+        self._recording_cache[recording_id] = cache
+        return cache
+
+    def _add_map(self, data: HeteroData, real_idx: int, arrays: dict[str, np.ndarray]) -> None:
+        if self.dataset_name != "highD" or self.lane_cache_root is None:
+            self._add_pseudo_map(data)
+            return
+        if "meta_recordingId" not in arrays or "x_last_abs" not in arrays:
+            self._warn_lane_cache_once("meta_recordingId.npy or x_last_abs.npy is missing")
+            self._add_pseudo_map(data)
+            return
+        recording_id = int(arrays["meta_recordingId"][real_idx])
+        cache = self._load_recording_cache(recording_id)
+        if cache is None:
+            self._warn_lane_cache_once(f"cache for recording {recording_id} was not found in {self.lane_cache_root}")
+            self._add_pseudo_map(data)
+            return
+
+        ref = np.asarray(arrays["x_last_abs"][real_idx], dtype=np.float32)
+        segments = np.asarray(cache.get("segments", np.zeros((0, 11, 2), dtype=np.float32)), dtype=np.float32)
+        if segments.size == 0:
+            self._add_pseudo_map(data)
+            return
+        scene_segments = segments - ref.reshape(1, 1, 2)
+        centers = scene_segments.mean(axis=1)
+        distances = np.linalg.norm(centers, axis=1)
+        keep = np.flatnonzero(distances <= self.lane_radius)
+        if keep.size == 0:
+            self._add_pseudo_map(data)
+            return
+        keep = keep[np.argsort(distances[keep])]
+        if self.lane_max_segments > 0:
+            keep = keep[: self.lane_max_segments]
+        self._add_lane_segment_map(data, scene_segments[keep])
+
+    def _add_lane_segment_map(self, data: HeteroData, segments: np.ndarray) -> None:
+        num_polygons = int(segments.shape[0])
+        vectors = segments[:, 1:] - segments[:, :-1]
+        first_vec = vectors[:, 0]
+        polygon_pos = segments[:, 0]
+        polygon_orientation = np.arctan2(first_vec[:, 1], first_vec[:, 0]).astype(np.float32)
+
+        point_pos = segments[:, :-1].reshape(-1, 2).astype(np.float32)
+        point_vec = vectors.reshape(-1, 2).astype(np.float32)
+        point_orientation = np.arctan2(point_vec[:, 1], point_vec[:, 0]).astype(np.float32)
+        point_magnitude = np.linalg.norm(point_vec, axis=1).astype(np.float32)
+        points_per_polygon = int(segments.shape[1] - 1)
+        src = np.arange(num_polygons * points_per_polygon, dtype=np.int64)
+        dst = np.repeat(np.arange(num_polygons, dtype=np.int64), points_per_polygon)
+
+        data["map_polygon"]["num_nodes"] = num_polygons
+        data["map_polygon"]["position"] = torch.from_numpy(polygon_pos.astype(np.float32))
+        data["map_polygon"]["orientation"] = torch.from_numpy(polygon_orientation)
+        data["map_polygon"]["type"] = torch.zeros(num_polygons, dtype=torch.uint8)
+        data["map_polygon"]["is_intersection"] = torch.ones(num_polygons, dtype=torch.uint8)
+
+        data["map_point"]["num_nodes"] = int(point_pos.shape[0])
+        data["map_point"]["position"] = torch.from_numpy(point_pos)
+        data["map_point"]["orientation"] = torch.from_numpy(point_orientation)
+        data["map_point"]["magnitude"] = torch.from_numpy(point_magnitude)
+        data["map_point"]["type"] = torch.full((point_pos.shape[0],), 16, dtype=torch.uint8)
+        data["map_point"]["side"] = torch.full((point_pos.shape[0],), 2, dtype=torch.uint8)
+        data["map_point", "to", "map_polygon"]["edge_index"] = torch.from_numpy(np.stack([src, dst], axis=0))
+
+        pl_edges, pl_types = self._lane_connectivity(segments)
+        data["map_polygon", "to", "map_polygon"]["edge_index"] = pl_edges
+        data["map_polygon", "to", "map_polygon"]["type"] = pl_types
+
+    @staticmethod
+    def _lane_connectivity(segments: np.ndarray) -> tuple[torch.Tensor, torch.Tensor]:
+        edges: list[tuple[int, int]] = []
+        types: list[int] = []
+        starts = segments[:, 0]
+        ends = segments[:, -1]
+        y_tol = 1.0e-3
+        x_tol = 1.0e-3
+        for i in range(int(segments.shape[0])):
+            delta = starts - ends[i]
+            hits = np.flatnonzero((np.abs(delta[:, 0]) <= x_tol) & (np.abs(delta[:, 1]) <= y_tol))
+            for j in hits:
+                if int(j) == i:
+                    continue
+                edges.append((i, int(j)))
+                types.append(1)  # PRED: i is predecessor of j.
+                edges.append((int(j), i))
+                types.append(2)  # SUCC: j is successor of i.
+        if not edges:
+            return torch.empty(2, 0, dtype=torch.long), torch.empty(0, dtype=torch.uint8)
+        return torch.tensor(edges, dtype=torch.long).t().contiguous(), torch.tensor(types, dtype=torch.uint8)
 
     def _add_pseudo_map(self, data: HeteroData) -> None:
         l = self.lane_half_length
@@ -223,6 +346,9 @@ class NeighFormerQCNetDataset(Dataset):
             "max_neighbors": self.max_neighbors,
             "neighbor_indices": [int(v) for v in self.nb_feature_indices],
             "neighbor_names": self.nb_feature_names,
-            "pseudo_map": True,
+            "pseudo_map": not bool(self.dataset_name == "highD" and self.lane_cache_root and self.lane_cache_root.exists()),
+            "lane_cache_root": str(self.lane_cache_root) if self.lane_cache_root else None,
+            "lane_radius": self.lane_radius,
+            "lane_max_segments": self.lane_max_segments,
             "agent_attr_dim": 2 if self.feature_mode == "dimI" else 0,
         }

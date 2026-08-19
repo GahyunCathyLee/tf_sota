@@ -1,6 +1,10 @@
+adapter: qcnet
+model_name: qcnet
+display_name: "QCNet"
+
 # Shared QCNet hyperparameters for highD/exiD runs.
 #
-# Per-run configs at configs/<dataset><feature>-<seed>.yaml only set
+# Per-run configs at configs/qcnet/<dataset><feature>-<seed>.yaml only set
 # dataset / feature_mode / exp_tag / seed. Edit model or optimiser settings here
 # to keep the sweep consistent.
 
@@ -47,6 +51,9 @@ training:
   tensorboard_dir: tensorboard/qcnet
   output_dir: runs/qcnet/{dataset}/{feature_mode}/{exp_tag}
   lane_half_length: 120.0
+  lane_cache_root: "{data_root}/{dataset}/simpl_lane_graph"
+  lane_radius: 120.0
+  lane_max_segments: 192
   upstream_dir: external/qcnet
 
 runtime:

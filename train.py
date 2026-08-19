@@ -43,6 +43,8 @@ def detect_adapter(config: Path) -> str:
     adapter = raw.get("adapter")
     if adapter:
         return str(adapter)
+    if "/hivt/" in str(config).replace("\\", "/"):
+        return "hivt"
     if "/par/" in str(config).replace("\\", "/"):
         return "par"
     if "/simpl/" in str(config).replace("\\", "/"):
@@ -55,7 +57,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--config", required=True, type=Path)
     known, _ = parser.parse_known_args(argv)
     adapter = detect_adapter(known.config)
-    if adapter == "simpl":
+    if adapter == "hivt":
+        from adapters.hivt.train import main as adapter_main
+    elif adapter == "simpl":
         from adapters.simpl.train import main as adapter_main
     elif adapter == "par":
         from adapters.par.train import main as adapter_main

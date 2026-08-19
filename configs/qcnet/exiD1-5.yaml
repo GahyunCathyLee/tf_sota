@@ -1,7 +1,9 @@
 # QCNet | exiD | dimI | seed 777
-base: qcnet/_base.yaml
+base: _base.yaml
+
 exp_tag: exiD1-5
 dataset: exiD
 feature_mode: dimI
+
 runtime:
   seed: 777

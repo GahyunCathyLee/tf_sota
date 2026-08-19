@@ -1,19 +1,55 @@
-model: hivt
+adapter: hivt
+model_name: hivt
 display_name: "HiVT"
-upstream_dir: "external/hivt"
-adapter_dir: "adapters/hivt"
-input:
-  coordinate_frame: "agent_centric"
-  uses_map: true
-  ego_channels: 6
-  neighbor_baseline_channels: 6
-  raw_neighbor_channels: 10
-  neighbor_dimI_channels: 8
-training:
+
+data:
+  root: data
+  hz: 3.0
   batch_size: 128
+  num_workers: 8
+  pin_memory: true
+  persistent_workers: true
+
+model:
+  historical_steps: 6
+  future_steps: 15
+  num_modes: 6
+  rotate: false
+  node_dim: 6
+  edge_dim: 2
+  embed_dim: 64
+  num_heads: 4
+  dropout: 0.1
+  num_temporal_layers: 2
+  num_global_layers: 2
+  local_radius: 50.0
+  parallel: false
+  lr: 5.0e-4
+  weight_decay: 1.0e-4
+
+training:
   epochs: 100
-  lr: 0.0005
-  accelerator: "gpu"
-notes:
-  - "Original code targets Argoverse 1."
-  - "First adapter target: map NeighFormer highD/exiD npy samples to HiVT temporal graph data."
+  accelerator: auto
+  devices: 1
+  ckpt_dir: ckpts/hivt
+  tensorboard_dir: tensorboard/hivt
+  output_dir: runs/hivt/{dataset}/{feature_mode}/{exp_tag}
+  lane_half_length: 120.0
+  lane_cache_root: "{data_root}/{dataset}/simpl_lane_graph"
+  lane_radius: 120.0
+  lane_max_segments: 192
+  upstream_dir: external/hivt
+
+runtime:
+  seed: 42
+
+smoke:
+  epochs: 2
+  batch_size: 16
+  train_samples: 512
+  eval_samples: 256
+  model_hparams:
+    embed_dim: 32
+    num_heads: 4
+    num_temporal_layers: 1
+    num_global_layers: 1

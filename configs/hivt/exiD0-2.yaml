@@ -1,5 +1,5 @@
-# QCNet | exiD | baseline | seed 1234
-base: qcnet/_base.yaml
+# HiVT | exiD | baseline | seed 1234
+base: _base.yaml
 exp_tag: exiD0-2
 dataset: exiD
 feature_mode: baseline

@@ -1,0 +1,12 @@
+base: ../models/hivt.yaml
+
+# Naming follows neighformer/configs:
+#   <dataset><feature>-<seed_index>
+#     feature    0 = baseline (pva)
+#                1 = dimI     (pva + dim, I)
+#     seed_index 1=42  2=1234  3=3407  4=0  5=777
+
+training:
+  output_dir: "runs/hivt/{dataset}/{feature_mode}/{exp_tag}"
+  ckpt_dir: "ckpts/hivt"
+  tensorboard_dir: "tensorboard/hivt"

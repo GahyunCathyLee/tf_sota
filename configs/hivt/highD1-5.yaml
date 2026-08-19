@@ -1,5 +1,5 @@
-# QCNet | highD | dimI | seed 777
-base: qcnet/_base.yaml
+# HiVT | highD | dimI | seed 777
+base: _base.yaml
 exp_tag: highD1-5
 dataset: highD
 feature_mode: dimI
