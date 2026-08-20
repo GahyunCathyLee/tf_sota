@@ -39,6 +39,9 @@ DEFAULTS: dict[str, Any] = {
     "accelerator": "auto",
     "devices": 1,
     "epochs": 100,
+    "progress_bar": False,
+    "log_every_n_steps": 50,
+    "matmul_precision": "medium",
     "ckpt_dir": "ckpts/hivt",
     "tensorboard_dir": "tensorboard/hivt",
     "output_dir": "runs/hivt/{dataset}/{feature_mode}/{exp_tag}",
@@ -68,7 +71,7 @@ DEFAULTS: dict[str, Any] = {
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--config", required=True, type=Path)
-    p.add_argument("--mode", default="smoke", choices=["smoke", "full", "check-data"])
+    p.add_argument("--mode", default="full", choices=["smoke", "full", "check-data"])
     p.add_argument("--dataset", choices=["highD", "exiD"])
     p.add_argument("--feature-mode", choices=["baseline", "dimI"])
     p.add_argument("--data-root", type=Path)
@@ -82,6 +85,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--seed", type=int)
     p.add_argument("--accelerator", choices=["auto", "gpu", "cpu"])
     p.add_argument("--devices", type=int)
+    p.add_argument("--progress-bar", action="store_true")
+    p.add_argument("--log-every-n-steps", type=int)
+    p.add_argument("--matmul-precision", choices=["highest", "high", "medium"])
     p.add_argument("--max-train-samples", type=int)
     p.add_argument("--max-eval-samples", type=int)
     p.add_argument("--lane-cache-root", type=Path)
@@ -161,6 +167,8 @@ def apply_cli(cfg: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]:
         ("seed", "seed"),
         ("accelerator", "accelerator"),
         ("devices", "devices"),
+        ("log_every_n_steps", "log_every_n_steps"),
+        ("matmul_precision", "matmul_precision"),
         ("max_train_samples", "max_train_samples"),
         ("max_eval_samples", "max_eval_samples"),
         ("lane_cache_root", "lane_cache_root"),
@@ -171,6 +179,8 @@ def apply_cli(cfg: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]:
         value = getattr(args, cli_name)
         if value is not None:
             cfg[cfg_name] = value
+    if args.progress_bar:
+        cfg["progress_bar"] = True
     if not cfg["dataset"] or not cfg["feature_mode"]:
         raise SystemExit("dataset and feature_mode must be set by config or CLI")
     if not cfg["exp_tag"]:
@@ -201,6 +211,11 @@ def set_seed(seed: int) -> None:
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
+
+
+def set_matmul_precision(precision: str | None) -> None:
+    if precision and hasattr(torch, "set_float32_matmul_precision"):
+        torch.set_float32_matmul_precision(str(precision))
 
 
 def subset_indices(indices: np.ndarray, limit: int | None) -> np.ndarray:
@@ -257,6 +272,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     cfg = apply_cli(load_config(args.config), args)
     set_seed(int(cfg["seed"]))
+    set_matmul_precision(cfg.get("matmul_precision"))
 
     data_root = resolve_path(cfg["data_root"])
     cfg["data_root"] = str(data_root)
@@ -334,15 +350,18 @@ def main(argv: list[str] | None = None) -> int:
         default_root_dir=str(tb_dir),
         callbacks=callbacks,
         logger=True,
+        enable_progress_bar=bool(cfg["progress_bar"]),
+        log_every_n_steps=int(cfg["log_every_n_steps"]),
     )
 
-    print("====== HiVT Train ======")
-    print(f"upstream : {upstream_dir} ({upstream_commit(upstream_dir)})")
-    print(f"data     : {data_path}")
-    print(f"lanes    : {lane_cache_root if lane_cache_root else 'pseudo fallback'}")
-    print(f"samples  : train={len(train_ds):,} val={len(val_ds):,}")
-    print(f"node_dim : {train_ds.node_dim}")
-    print(f"ckpt     : {ckpt_dir}")
+    print("====== HiVT Train ======", flush=True)
+    print(f"upstream : {upstream_dir} ({upstream_commit(upstream_dir)})", flush=True)
+    print(f"data     : {data_path}", flush=True)
+    print(f"lanes    : {lane_cache_root if lane_cache_root else 'pseudo fallback'}", flush=True)
+    print(f"samples  : train={len(train_ds):,} val={len(val_ds):,}", flush=True)
+    print(f"mode     : {cfg['mode']}  epochs={cfg['epochs']}  batch_size={cfg['batch_size']}", flush=True)
+    print(f"node_dim : {train_ds.node_dim}", flush=True)
+    print(f"ckpt     : {ckpt_dir}", flush=True)
     trainer.fit(model, train_loader, val_loader)
 
     checkpoint_cb = callbacks[0]

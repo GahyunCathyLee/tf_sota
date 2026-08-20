@@ -31,6 +31,9 @@ training:
   epochs: 100
   accelerator: auto
   devices: 1
+  progress_bar: false
+  log_every_n_steps: 50
+  matmul_precision: medium
   ckpt_dir: ckpts/hivt
   tensorboard_dir: tensorboard/hivt
   output_dir: runs/hivt/{dataset}/{feature_mode}/{exp_tag}
