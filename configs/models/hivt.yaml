@@ -5,8 +5,8 @@ display_name: "HiVT"
 data:
   root: data
   hz: 3.0
-  batch_size: 128
-  num_workers: 8
+  batch_size: 512
+  num_workers: 24
   pin_memory: true
   persistent_workers: true
 
@@ -28,7 +28,7 @@ model:
   weight_decay: 1.0e-4
 
 training:
-  epochs: 100
+  epochs: 10
   accelerator: auto
   devices: 1
   progress_bar: false

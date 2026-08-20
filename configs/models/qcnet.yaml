@@ -44,7 +44,7 @@ model:
   weight_decay: 1.0e-4
 
 training:
-  epochs: 50
+  epochs: 20
   accelerator: auto
   devices: 1
   ckpt_dir: ckpts/qcnet
