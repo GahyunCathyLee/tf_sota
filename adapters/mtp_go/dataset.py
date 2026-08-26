@@ -52,6 +52,15 @@ EGO_EXTRA_FILL = -1.0
 TARGET_CHANNELS = 6
 
 
+class MTPGoData(Data):
+    """PyG graph data with global sample ids kept unchanged while batching."""
+
+    def __inc__(self, key: str, value: Any, *args: Any, **kwargs: Any) -> Any:
+        if key == "sample_index":
+            return 0
+        return super().__inc__(key, value, *args, **kwargs)
+
+
 def build_edges(pos: np.ndarray, present: np.ndarray) -> tuple[torch.Tensor, torch.Tensor]:
     """Fully connected edges (with self-loops) over present nodes.
 
@@ -189,7 +198,7 @@ class NeighFormerGraphDataset(Dataset):
         dim = torch.zeros(n_nodes, 2, dtype=torch.float32)
         cf = torch.full((n_nodes,), 3, dtype=torch.long)
 
-        return Data(
+        return MTPGoData(
             x=torch.from_numpy(x),
             edge_index=hist_ei,
             edge_features=hist_ef,

@@ -202,6 +202,8 @@ class SampleMetaLookup:
     def __init__(self, data_dir: Path, labels_lut: dict | None) -> None:
         self.labels_lut = labels_lut
         self.meta: dict[str, np.ndarray] | None = None
+        self.meta_len = 0
+        self._warned_bounds = False
         if labels_lut is None:
             return
         files = {
@@ -214,16 +216,53 @@ class SampleMetaLookup:
             self.labels_lut = None
             return
         self.meta = {k: np.load(p, mmap_mode="r") for k, p in files.items()}
+        lengths = {k: int(v.shape[0]) for k, v in self.meta.items()}
+        self.meta_len = min(lengths.values())
+        if len(set(lengths.values())) > 1:
+            print(
+                "[WARN] meta_*.npy length mismatch "
+                f"{lengths}; scenario lookup will use the first {self.meta_len:,} rows"
+            )
 
     @property
     def enabled(self) -> bool:
-        return self.labels_lut is not None and self.meta is not None
+        return self.labels_lut is not None and self.meta is not None and self.meta_len > 0
+
+    def warn_if_incomplete(self, sample_indices: np.ndarray, context: str = "split") -> None:
+        """Warn once if a split contains sample ids not covered by meta arrays."""
+        if not self.enabled or self._warned_bounds:
+            return
+        sample_indices = np.asarray(sample_indices, dtype=np.int64).reshape(-1)
+        if sample_indices.size == 0:
+            return
+        bad = (sample_indices < 0) | (sample_indices >= self.meta_len)
+        if not bad.any():
+            return
+        bad_values = sample_indices[bad]
+        hi = self.meta_len - 1
+        print(
+            f"[WARN] scenario meta covers sample indices 0..{hi:,}, but {context} "
+            f"contains {int(bad.sum()):,}/{sample_indices.size:,} out-of-range "
+            f"indices (min={int(bad_values.min()):,}, max={int(bad_values.max()):,}). "
+            "Those samples remain in overall metrics but are skipped in scenario breakdown."
+        )
+        self._warned_bounds = True
 
     def lookup(self, sample_indices: np.ndarray) -> list[dict[str, str] | None] | None:
         if not self.enabled:
             return None
         out: list[dict[str, str] | None] = []
         for i in sample_indices:
+            i = int(i)
+            if i < 0 or i >= self.meta_len:
+                if not self._warned_bounds:
+                    print(
+                        f"[WARN] sample index {i:,} is outside scenario meta range "
+                        f"0..{self.meta_len - 1:,}; skipping out-of-range scenario labels"
+                    )
+                    self._warned_bounds = True
+                out.append(None)
+                continue
             key = (
                 int(self.meta["rec"][i]),
                 int(self.meta["track"][i]),

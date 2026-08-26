@@ -274,6 +274,11 @@ def main(argv: list[str] | None = None) -> int:
                   else data_dir / "scenario_labels.csv")
         )
         meta_lookup = SampleMetaLookup(data_dir, load_scenario_labels(Path(labels_path)))
+        if meta_lookup.enabled:
+            meta_lookup.warn_if_incomplete(
+                split_idx,
+                context=f"{dataset_name}/{args.split} split",
+            )
 
     print(f"\n====== Evaluation  [{args.split}] ======")
     results = run_evaluate(model, loader, device, dt, hz=hz, meta_lookup=meta_lookup, progress=True)
