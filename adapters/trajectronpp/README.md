@@ -14,9 +14,8 @@ Smoke:
 
 ```bash
 conda run -n trajectron++ python train.py \
-  --config configs/models/trajectronpp.yaml \
-  --dataset highD \
-  --feature-mode baseline \
+  --config configs/trajectronpp/highD0-1.yaml \
+  --mode smoke \
   --data-root /home/gahyun/neighformer/data \
   --device cpu
 ```
@@ -34,3 +33,13 @@ conda run -n trajectron++ python evaluate.py \
 Full training should be run on Colab/GPU with `--mode full` and an
 environment-compatible Trajectron++ checkout at `../trajectronPP` or via
 `--upstream-dir`.
+
+The full sweep configs live in `configs/trajectronpp/`. They default to
+`mode: full`, so this starts a real run:
+
+```bash
+conda run -n trajectron++ python train.py \
+  --config configs/trajectronpp/highD1-1.yaml \
+  --data-root /home/gahyun/neighformer/data \
+  --device cuda:0
+```

@@ -1,0 +1,10 @@
+# Trajectron++ | highD | baseline | seed 3407
+#   python train.py --config configs/trajectronpp/highD0-3.yaml
+base: _base.yaml
+
+exp_tag: highD0-3
+dataset: highD
+feature_mode: baseline
+
+runtime:
+  seed: 3407

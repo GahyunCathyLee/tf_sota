@@ -1,0 +1,10 @@
+# Trajectron++ | exiD | dimI | seed 1234
+#   python train.py --config configs/trajectronpp/exiD1-2.yaml
+base: _base.yaml
+
+exp_tag: exiD1-2
+dataset: exiD
+feature_mode: dimI
+
+runtime:
+  seed: 1234

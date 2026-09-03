@@ -1,0 +1,18 @@
+# Shared base for the Trajectron++ seed sweep.
+#
+# Per-run files intentionally match configs/mtp_go/*.yaml: only dataset,
+# feature_mode, exp_tag and seed change between runs. Shared Trajectron++
+# hyperparameters live in configs/models/trajectronpp.yaml.
+#
+# Naming follows neighformer/configs:
+#   <dataset><feature>-<seed_index>
+#     feature    0 = baseline (dx,dy,dvx,dvy,dax,day)
+#                1 = dimI     (+ dim, I)
+#     seed_index 1=42  2=1234  3=3407  4=0  5=777
+
+base: ../models/trajectronpp.yaml
+mode: full
+
+training:
+  output_dir: "runs/trajectronpp/{dataset}/{feature_mode}/{exp_tag}"
+  ckpt_dir: "ckpts/trajectronpp"

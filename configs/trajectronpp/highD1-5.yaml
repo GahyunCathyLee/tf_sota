@@ -1,0 +1,10 @@
+# Trajectron++ | highD | dimI | seed 777
+#   python train.py --config configs/trajectronpp/highD1-5.yaml
+base: _base.yaml
+
+exp_tag: highD1-5
+dataset: highD
+feature_mode: dimI
+
+runtime:
+  seed: 777

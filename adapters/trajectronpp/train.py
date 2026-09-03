@@ -38,6 +38,7 @@ from adapters.trajectronpp.upstream import add_upstream_to_path, upstream_commit
 
 DEFAULTS: dict[str, Any] = {
     "adapter": "trajectronpp",
+    "mode": "smoke",
     "dataset": "",
     "feature_mode": "",
     "exp_tag": "",
@@ -141,7 +142,7 @@ def yaml_dump(data: dict[str, Any]) -> str:
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--config", required=True, type=Path)
-    p.add_argument("--mode", default="smoke", choices=["smoke", "full", "check-data"])
+    p.add_argument("--mode", choices=["smoke", "full", "check-data"])
     p.add_argument("--dataset", choices=["highD", "exiD"])
     p.add_argument("--feature-mode", choices=["baseline", "dimI"])
     p.add_argument("--data-root", type=Path)
@@ -203,7 +204,7 @@ def load_config(path: Path) -> dict[str, Any]:
                         "n_workers": "preprocess_workers",
                     }.get(key, key)
                 ] = value
-    for key in ("adapter", "dataset", "feature_mode", "exp_tag", "upstream_dir"):
+    for key in ("adapter", "mode", "dataset", "feature_mode", "exp_tag", "upstream_dir"):
         if key in raw:
             cfg[key] = raw[key]
     if isinstance(raw.get("smoke"), dict):
@@ -216,7 +217,8 @@ def apply_cli(cfg: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]:
         cfg["dataset"] = args.dataset
     if args.feature_mode:
         cfg["feature_mode"] = args.feature_mode
-    if args.mode in {"smoke", "check-data"} or args.check_data:
+    mode = "check-data" if args.check_data else (args.mode or cfg.get("mode", "smoke"))
+    if mode in {"smoke", "check-data"}:
         for key, value in (cfg.get("smoke") or {}).items():
             cfg[{"train_samples": "max_train_samples", "eval_samples": "max_eval_samples"}.get(key, key)] = value
     for cli_name, cfg_name in (
@@ -238,7 +240,7 @@ def apply_cli(cfg: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]:
         value = getattr(args, cli_name)
         if value is not None:
             cfg[cfg_name] = value
-    cfg["mode"] = "check-data" if args.check_data else args.mode
+    cfg["mode"] = mode
     if not cfg["dataset"] or not cfg["feature_mode"]:
         raise SystemExit("dataset and feature_mode must be set by config or CLI")
     if not cfg["exp_tag"]:
