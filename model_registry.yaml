@@ -6,7 +6,7 @@ models:
     upstream_type: "official"
     license: "Apache-2.0"
     original_datasets: ["Argoverse 1"]
-    local_status: "not_cloned"
+    local_status: "cloned:external/mtrpp"
     feature_strategy: "Extend agent node feature construction to include baseline or dimI dynamic features."
     implementation_priority: 1
     compute_tier: "single_gpu"

@@ -1,19 +1,72 @@
+adapter: mtrpp
 model: mtrpp
 display_name: "MTR++"
 upstream_dir: "external/mtrpp"
 adapter_dir: "adapters/mtrpp"
+
+data:
+  root: "/home/gahyun/neighformer/data"
+  hz: 3.0
+  dt: 0.32
+
 input:
-  coordinate_frame: "scene_centric"
-  uses_map: true
+  coordinate_frame: "ego_centered"
+  uses_map: "pseudo_polyline_fallback"
   ego_channels: 6
   neighbor_baseline_channels: 6
   raw_neighbor_channels: 10
   neighbor_dimI_channels: 8
+
 training:
+  mode: full
   batch_size: 32
   epochs: 100
   lr: 0.0001
-  accelerator: "gpu"
+  weight_decay: 0.01
+  accelerator: "auto"
+  num_workers: 4
+  output_dir: "runs/mtrpp/{dataset}/{feature_mode}/{exp_tag}"
+  ckpt_dir: "ckpts/mtrpp"
+  processed_dir: "processed/mtrpp"
+  reuse_processed: false
+
+model:
+  d_model: 256
+  decoder_d_model: 512
+  map_d_model: 256
+  num_attn_head: 8
+  num_attn_layers: 6
+  num_decoder_layers: 6
+  num_motion_modes: 6
+  num_channel_agent: 256
+  num_channel_map: 64
+  num_map_polylines: 9
+  num_points_each_polyline: 20
+  num_base_map_polylines: 64
+  num_waypoint_map_polylines: 32
+  use_local_attn: false
+  lane_half_length: 160.0
+  lane_width: 3.7
+
+smoke:
+  epochs: 1
+  batch_size: 4
+  train_samples: 64
+  eval_samples: 32
+  num_workers: 0
+  global_attention_fallback: true
+  model_hparams:
+    d_model: 64
+    decoder_d_model: 128
+    map_d_model: 64
+    num_attn_layers: 1
+    num_decoder_layers: 1
+    num_attn_head: 4
+    num_channel_agent: 64
+    num_channel_map: 32
+    num_map_polylines: 7
+
 notes:
-  - "Start from the official MTR repo and implement MTR++-style multi-agent experiments when feasible."
-  - "A100 is recommended for full runs."
+  - "Uses the official MTR codebase from https://github.com/sshaoshuai/MTR.git."
+  - "NeighFormer arrays are converted to MTR scene-level batch dictionaries; the model architecture is not reimplemented."
+  - "highD/exiD do not provide HD maps, so the adapter supplies minimal straight-lane MTR map polylines unless a richer map source is added later."

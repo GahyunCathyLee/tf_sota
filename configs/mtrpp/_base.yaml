@@ -1,0 +1,8 @@
+# Shared base for the MTR++ seed sweep.
+
+base: ../models/mtrpp.yaml
+
+training:
+  output_dir: "runs/mtrpp/{dataset}/{feature_mode}/{exp_tag}"
+  ckpt_dir: "ckpts/mtrpp"
+  processed_dir: "processed/mtrpp"

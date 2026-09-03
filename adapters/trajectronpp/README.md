@@ -43,3 +43,24 @@ conda run -n trajectron++ python train.py \
   --data-root /home/gahyun/neighformer/data \
   --device cuda:0
 ```
+
+To avoid slow Colab preprocessing, build the Trajectron++ pickle files once on a
+faster/local machine:
+
+```bash
+conda run -n trajectron++ python train.py \
+  --config configs/trajectronpp/highD1-1.yaml \
+  --mode preprocess \
+  --data-root /home/gahyun/neighformer/data
+```
+
+Then upload at least `processed/train_env.pkl` and `processed/val_env.pkl` for
+that run, and train on Colab with:
+
+```bash
+python train.py \
+  --config configs/trajectronpp/highD1-1.yaml \
+  --processed-dir /content/drive/MyDrive/path/to/processed \
+  --reuse-processed \
+  --device cuda:0
+```

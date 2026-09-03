@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import dill
 import json
 import os
 import platform
@@ -45,6 +46,8 @@ DEFAULTS: dict[str, Any] = {
     "data_root": "data",
     "output_dir": "",
     "ckpt_dir": "",
+    "processed_dir": "",
+    "reuse_processed": False,
     "upstream_dir": "../trajectronPP",
     "dt": 0.32,
     "eval_hz": 3.0,
@@ -57,6 +60,7 @@ DEFAULTS: dict[str, Any] = {
     "grad_clip_norm": 1.0,
     "preprocess_workers": 0,
     "offline_scene_graph": "yes",
+    "precompute_scene_graphs": True,
     "dynamic_edges": "yes",
     "max_train_samples": None,
     "max_eval_samples": None,
@@ -142,7 +146,7 @@ def yaml_dump(data: dict[str, Any]) -> str:
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--config", required=True, type=Path)
-    p.add_argument("--mode", choices=["smoke", "full", "check-data"])
+    p.add_argument("--mode", choices=["smoke", "full", "check-data", "preprocess"])
     p.add_argument("--dataset", choices=["highD", "exiD"])
     p.add_argument("--feature-mode", choices=["baseline", "dimI"])
     p.add_argument("--data-root", type=Path)
@@ -159,6 +163,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--max-train-samples", type=int)
     p.add_argument("--max-eval-samples", type=int)
     p.add_argument("--upstream-dir", type=Path)
+    p.add_argument("--processed-dir", type=Path)
+    p.add_argument("--reuse-processed", action="store_true")
     p.add_argument("--check-data", action="store_true")
     return p.parse_args(argv)
 
@@ -204,7 +210,17 @@ def load_config(path: Path) -> dict[str, Any]:
                         "n_workers": "preprocess_workers",
                     }.get(key, key)
                 ] = value
-    for key in ("adapter", "mode", "dataset", "feature_mode", "exp_tag", "upstream_dir"):
+    for key in (
+        "adapter",
+        "mode",
+        "dataset",
+        "feature_mode",
+        "exp_tag",
+        "upstream_dir",
+        "reuse_processed",
+        "processed_dir",
+        "precompute_scene_graphs",
+    ):
         if key in raw:
             cfg[key] = raw[key]
     if isinstance(raw.get("smoke"), dict):
@@ -236,10 +252,13 @@ def apply_cli(cfg: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]:
         ("max_train_samples", "max_train_samples"),
         ("max_eval_samples", "max_eval_samples"),
         ("upstream_dir", "upstream_dir"),
+        ("processed_dir", "processed_dir"),
     ):
         value = getattr(args, cli_name)
         if value is not None:
             cfg[cfg_name] = value
+    if args.reuse_processed:
+        cfg["reuse_processed"] = True
     cfg["mode"] = mode
     if not cfg["dataset"] or not cfg["feature_mode"]:
         raise SystemExit("dataset and feature_mode must be set by config or CLI")
@@ -335,6 +354,43 @@ def trajectron_config(cfg: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def report_from_environment(env: Any, cfg: dict[str, Any], split: str, data_path: Path, pkl_path: Path) -> dict[str, Any]:
+    scenes = getattr(env, "scenes", [])
+    return {
+        "dataset": cfg["dataset"],
+        "split": split,
+        "feature_mode": cfg["feature_mode"],
+        "data_dir": str(data_path),
+        "source": str(pkl_path),
+        "num_samples": int(len(scenes)),
+        "num_scenes": int(len(scenes)),
+        "state": {"VEHICLE": state_spec(cfg["feature_mode"])},
+        "pred_state": {"VEHICLE": PRED_STATE},
+        "neighbor_names": feature_mode_names(cfg["feature_mode"]),
+        "attention_radius": float(getattr(env, "attention_radius", {}).get((env.NodeType.VEHICLE, env.NodeType.VEHICLE), 100.0)),
+        "dt": float(scenes[0].dt) if scenes else float(cfg["dt"]),
+        "nodes": {
+            "min": int(min(len(s.nodes) for s in scenes)) if scenes else 0,
+            "max": int(max(len(s.nodes) for s in scenes)) if scenes else 0,
+            "mean": float(np.mean([len(s.nodes) for s in scenes])) if scenes else 0.0,
+        },
+    }
+
+
+def precompute_scene_graphs(env: Any, split: str) -> None:
+    from tqdm import tqdm
+
+    missing = [scene for scene in env.scenes if scene.temporal_scene_graph is None]
+    if not missing:
+        return
+    for scene in tqdm(missing, desc=f"{split} scene graphs", ncols=80, file=sys.stdout):
+        scene.calculate_scene_graph(
+            env.attention_radius,
+            edge_addition_filter=[0.25, 0.5, 0.75, 1.0],
+            edge_removal_filter=[1.0, 0.0],
+        )
+
+
 def prepare_data(cfg: dict[str, Any], upstream_dir: Path, output_dir: Path) -> tuple[Path, dict[str, Any]]:
     data_root = resolve_path(cfg["data_root"])
     data_path = dataset_dir(data_root, cfg["dataset"])
@@ -342,9 +398,23 @@ def prepare_data(cfg: dict[str, Any], upstream_dir: Path, output_dir: Path) -> t
         DatasetSpec(cfg["dataset"], cfg["feature_mode"], "train", data_path, split_indices_path(data_root, cfg["dataset"], "train")),
         require_split=True,
     )
-    proc_dir = output_dir / "processed"
+    proc_dir = format_path_template(cfg["processed_dir"], cfg) if cfg.get("processed_dir") else output_dir / "processed"
     reports = {}
-    for split in ("train", "val", "test"):
+    splits = ("train", "val", "test") if cfg["mode"] in {"check-data", "preprocess"} else ("train", "val")
+    for split in splits:
+        pkl_path = proc_dir / f"{split}_env.pkl"
+        if cfg.get("reuse_processed"):
+            if not pkl_path.exists():
+                raise FileNotFoundError(
+                    f"{pkl_path} not found. Upload prebuilt {split}_env.pkl or run without --reuse-processed."
+                )
+            print(f"[DATA] Reusing {pkl_path}", flush=True)
+            with pkl_path.open("rb") as f:
+                env = dill.load(f, encoding="latin1")
+            report = report_from_environment(env, cfg, split, data_path, pkl_path)
+            write_report(output_dir / f"{split}_data_report.json", report)
+            reports[split] = report
+            continue
         limit = cfg["max_train_samples"] if split == "train" else cfg["max_eval_samples"]
         indices = subset_indices(np.load(split_indices_path(data_root, cfg["dataset"], split)), limit)
         print(
@@ -362,9 +432,12 @@ def prepare_data(cfg: dict[str, Any], upstream_dir: Path, output_dir: Path) -> t
             dt=float(cfg["dt"]),
             progress=True,
         )
-        write_environment(proc_dir / f"{split}_env.pkl", env)
+        if cfg.get("precompute_scene_graphs") and cfg.get("offline_scene_graph") == "yes":
+            print(f"[DATA] Precomputing {split} scene graphs before pickle write...", flush=True)
+            precompute_scene_graphs(env, split)
+        write_environment(pkl_path, env)
         write_report(output_dir / f"{split}_data_report.json", report)
-        print(f"[DATA] Wrote {proc_dir / f'{split}_env.pkl'}", flush=True)
+        print(f"[DATA] Wrote {pkl_path}", flush=True)
         reports[split] = report
     return proc_dir, reports
 
@@ -431,7 +504,7 @@ def main(argv: list[str] | None = None) -> int:
     (output_dir / "run_config.yaml").write_text(yaml_dump(to_plain(run_config)), encoding="utf-8")
     (output_dir / "data_report.json").write_text(json.dumps(reports, indent=2), encoding="utf-8")
 
-    if cfg["mode"] == "check-data":
+    if cfg["mode"] in {"check-data", "preprocess"}:
         print(json.dumps(reports, indent=2))
         return 0
 

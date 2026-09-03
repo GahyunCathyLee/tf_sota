@@ -40,9 +40,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--model", help="Optional legacy selector; adapter is inferred from --ckpt.")
     parser.add_argument("--ckpt", required=True, type=Path)
     known, _ = parser.parse_known_args(argv)
-    adapter = detect_adapter(known.ckpt)
+    adapter = str(known.model) if known.model else detect_adapter(known.ckpt)
     if adapter == "hivt":
         from adapters.hivt.evaluate import main as adapter_main
+    elif adapter == "mtrpp":
+        from adapters.mtrpp.evaluate import main as adapter_main
     elif adapter == "simpl":
         from adapters.simpl.evaluate import main as adapter_main
     elif adapter == "par":

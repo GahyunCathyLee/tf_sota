@@ -80,6 +80,8 @@ def main(argv: list[str] | None = None) -> int:
     adapter = detect_adapter(known.config)
     if adapter == "hivt":
         from adapters.hivt.train import main as adapter_main
+    elif adapter == "mtrpp":
+        from adapters.mtrpp.train import main as adapter_main
     elif adapter == "simpl":
         from adapters.simpl.train import main as adapter_main
     elif adapter == "par":
