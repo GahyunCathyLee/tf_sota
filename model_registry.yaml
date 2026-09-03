@@ -102,8 +102,8 @@ models:
     upstream_type: "paper_and_project_page_no_official_training_code_found"
     license: "n/a"
     original_datasets: ["Waymo Open Motion"]
-    local_status: "reimplement_required"
-    feature_strategy: "Implement a small trajectory-token language model over highD/exiD; include dim/I in token embedding or side-channel embedding."
+    local_status: "waiting_for_original_or_faithful_upstream"
+    feature_strategy: "Integrate original or faithful MotionLM code first; adapt only the highD/exiD input/tokenization path and include dim/I without a style-only reimplementation."
     implementation_priority: 10
     compute_tier: "a100_recommended"
 
@@ -127,7 +127,7 @@ models:
     upstream_type: "official"
     license: "MIT"
     original_datasets: ["nuScenes", "ETH/UCY"]
-    local_status: "available_as_sibling:../Trajectron-plus-plus"
-    feature_strategy: "Fix highD/exiD environment standardization; define VEHICLE state with baseline or dimI channels."
+    local_status: "available_as_sibling:../trajectronPP"
+    feature_strategy: "Convert highD/exiD windows to Trajectron++ Environment pickles; keep the original model/training code and select baseline or dimI neighbor edge inputs through config."
     implementation_priority: 2
     compute_tier: "a100_recommended"

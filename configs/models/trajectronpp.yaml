@@ -1,19 +1,46 @@
 model: trajectronpp
 display_name: "Trajectron++"
-upstream_dir: "external/trajectronpp"
+upstream_dir: "../trajectronPP"
 adapter_dir: "adapters/trajectronpp"
+adapter: trajectronpp
+exp_tag: ""
+
+data:
+  root: data
+  hz: 3.0
+
 input:
   coordinate_frame: "environment_graph"
-  uses_map: optional
+  uses_map: false
   ego_channels: 6
   neighbor_baseline_channels: 6
   raw_neighbor_channels: 10
   neighbor_dimI_channels: 8
+
 training:
   batch_size: 64
   epochs: 100
   lr: 0.001
-  accelerator: "gpu"
+  clip: 1.0
+  accelerator: "auto"
+  output_dir: ""
+  ckpt_dir: ""
+
+runtime:
+  seed: 42
+  n_workers: 0
+  dt: 0.32
+
+smoke:
+  epochs: 1
+  batch_size: 4
+  eval_batch_size: 4
+  train_samples: 16
+  eval_samples: 8
+  preprocess_workers: 0
+  offline_scene_graph: "yes"
+
 notes:
-  - "A sibling checkout exists at ../Trajectron-plus-plus."
-  - "Fix highD/exiD standardization and state schema before training."
+  - "Uses the local ../trajectronPP checkout and its original Trajectron++ model/training code."
+  - "The adapter writes Trajectron++ Environment pickles from NeighFormer npy windows."
+  - "baseline edge inputs are dx, dy, dvx, dvy, dax, day; dimI adds dim and I."

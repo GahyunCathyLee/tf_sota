@@ -8,7 +8,10 @@ import sys
 from pathlib import Path
 from typing import Any
 
-import yaml
+try:
+    import yaml
+except ImportError:
+    yaml = None
 
 ROOT = Path(__file__).resolve().parent
 
@@ -23,11 +26,29 @@ def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any
     return out
 
 
+def _simple_yaml_load(text: str) -> dict[str, Any]:
+    out: dict[str, Any] = {}
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or ":" not in stripped:
+            continue
+        if line.startswith(" ") or line.startswith("-"):
+            continue
+        key, value = stripped.split(":", 1)
+        value = value.strip().strip('"').strip("'")
+        if value in {"null", "None", "~"}:
+            out[key.strip()] = None
+        else:
+            out[key.strip()] = value
+    return out
+
+
 def load_raw_config(path: Path, seen: tuple[Path, ...] = ()) -> dict[str, Any]:
     path = path.resolve()
     if path in seen:
         raise SystemExit("Circular config base chain: " + " -> ".join(str(p) for p in (*seen, path)))
-    raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    text = path.read_text(encoding="utf-8")
+    raw = (yaml.safe_load(text) if yaml is not None else _simple_yaml_load(text)) or {}
     base_ref = raw.pop("base", None)
     if not base_ref:
         return raw
@@ -65,6 +86,8 @@ def main(argv: list[str] | None = None) -> int:
         from adapters.par.train import main as adapter_main
     elif adapter == "qcnet":
         from adapters.qcnet.train import main as adapter_main
+    elif adapter == "trajectronpp":
+        from adapters.trajectronpp.train import main as adapter_main
     else:
         raise SystemExit(f"Unknown adapter '{adapter}' in {known.config}")
     return adapter_main(argv)

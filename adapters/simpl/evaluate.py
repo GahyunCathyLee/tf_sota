@@ -112,7 +112,10 @@ def main(argv: list[str] | None = None) -> int:
     from simpl.simpl import Simpl  # noqa: WPS433
 
     device = torch.device(args.device) if args.device else torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    data_root = resolve_path(args.data_root) if args.data_root else resolve_path(cfg["data_root"])
+    if args.data_root:
+        cfg = dict(cfg)
+        cfg["data_root"] = str(args.data_root)
+    data_root = resolve_path(cfg["data_root"])
     data_path = dataset_dir(data_root, cfg["dataset"])
     lane_cache_value = args.lane_cache_root or cfg.get("lane_cache_root")
     lane_cache_root = resolve_path(str(lane_cache_value).format(**cfg)) if lane_cache_value else None

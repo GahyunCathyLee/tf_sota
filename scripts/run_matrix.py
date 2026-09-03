@@ -15,8 +15,8 @@ from typing import Any
 
 try:
     import yaml
-except ImportError as exc:
-    raise SystemExit("PyYAML is required: pip install pyyaml") from exc
+except ImportError:
+    yaml = None
 
 
 EXPERIMENT_ROOT = Path(__file__).resolve().parents[1]
@@ -25,9 +25,71 @@ MATRIX_PATH = EXPERIMENT_ROOT / "configs" / "matrix.yaml"
 REGISTRY_PATH = EXPERIMENT_ROOT / "model_registry.yaml"
 
 
+def parse_scalar(text: str) -> Any:
+    text = text.strip()
+    if (text.startswith('"') and text.endswith('"')) or (text.startswith("'") and text.endswith("'")):
+        return text[1:-1]
+    if text in {"null", "None", "~"}:
+        return None
+    if text.lower() in {"true", "false"}:
+        return text.lower() == "true"
+    if text.startswith("[") and text.endswith("]"):
+        inner = text[1:-1].strip()
+        return [] if not inner else [parse_scalar(part.strip()) for part in inner.split(",")]
+    try:
+        return int(text)
+    except ValueError:
+        pass
+    try:
+        return float(text)
+    except ValueError:
+        return text
+
+
+def simple_yaml_load(text: str) -> dict[str, Any]:
+    rows = []
+    for raw in text.splitlines():
+        if not raw.strip() or raw.lstrip().startswith("#"):
+            continue
+        rows.append((len(raw) - len(raw.lstrip(" ")), raw.strip()))
+
+    def parse_block(i: int, indent: int) -> tuple[Any, int]:
+        is_list = i < len(rows) and rows[i][0] == indent and rows[i][1].startswith("- ")
+        out: Any = [] if is_list else {}
+        while i < len(rows):
+            row_indent, row_text = rows[i]
+            if row_indent < indent:
+                break
+            if row_indent > indent:
+                i += 1
+                continue
+            if is_list:
+                out.append(parse_scalar(row_text[2:]))
+                i += 1
+                continue
+            key, sep, value = row_text.partition(":")
+            if not sep:
+                i += 1
+                continue
+            key = key.strip()
+            value = value.strip()
+            if value:
+                out[key] = parse_scalar(value)
+                i += 1
+            else:
+                child, i = parse_block(i + 1, indent + 2)
+                out[key] = child
+        return out, i
+
+    parsed, _ = parse_block(0, 0)
+    return parsed if isinstance(parsed, dict) else {}
+
+
 def load_yaml(path: Path) -> dict[str, Any]:
-    with path.open("r", encoding="utf-8") as f:
-        return yaml.safe_load(f)
+    text = path.read_text(encoding="utf-8")
+    if yaml is not None:
+        return yaml.safe_load(text) or {}
+    return simple_yaml_load(text)
 
 
 def command_for(job: dict[str, str], matrix: dict[str, Any]) -> list[str]:

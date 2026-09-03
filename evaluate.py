@@ -12,9 +12,16 @@ import torch
 ROOT = Path(__file__).resolve().parent
 
 
+def load_checkpoint(path: Path):
+    try:
+        return torch.load(path, map_location="cpu", weights_only=False)
+    except TypeError:
+        return torch.load(path, map_location="cpu")
+
+
 def detect_adapter(ckpt_path: Path) -> str:
     path = ckpt_path if ckpt_path.is_absolute() else (ROOT / ckpt_path).resolve()
-    ckpt = torch.load(path, map_location="cpu", weights_only=False)
+    ckpt = load_checkpoint(path)
     cfg = ckpt.get("cfg", {})
     adapter = cfg.get("adapter")
     if adapter:
@@ -30,6 +37,7 @@ def detect_adapter(ckpt_path: Path) -> str:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--model", help="Optional legacy selector; adapter is inferred from --ckpt.")
     parser.add_argument("--ckpt", required=True, type=Path)
     known, _ = parser.parse_known_args(argv)
     adapter = detect_adapter(known.ckpt)
@@ -41,6 +49,8 @@ def main(argv: list[str] | None = None) -> int:
         from adapters.par.evaluate import main as adapter_main
     elif adapter == "qcnet":
         from adapters.qcnet.evaluate import main as adapter_main
+    elif adapter == "trajectronpp":
+        from adapters.trajectronpp.evaluate import main as adapter_main
     else:
         raise SystemExit(f"Unknown adapter '{adapter}' in {known.ckpt}")
     return adapter_main(argv)

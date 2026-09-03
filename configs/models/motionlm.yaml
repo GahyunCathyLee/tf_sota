@@ -9,6 +9,7 @@ input:
   neighbor_baseline_channels: 6
   raw_neighbor_channels: 10
   neighbor_dimI_channels: 8
+
 training:
   batch_size: 32
   epochs: 100
@@ -16,4 +17,4 @@ training:
   accelerator: "gpu"
 notes:
   - "No official public training code found."
-  - "Implement a compact MotionLM-style tokenizer and autoregressive transformer for highD/exiD."
+  - "Wait for original code or a faithful upstream implementation; do not use a style-only adapter for final experiments."
