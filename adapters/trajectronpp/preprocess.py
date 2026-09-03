@@ -3,11 +3,16 @@
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 from typing import Any
 
 import dill
 import numpy as np
+try:
+    from tqdm import tqdm
+except ImportError:
+    tqdm = None
 
 from adapters.common import feature_mode_indices, feature_mode_names
 
@@ -166,6 +171,7 @@ def build_environment(
     split: str,
     upstream_dir: Path,
     dt: float = 0.32,
+    progress: bool = False,
 ) -> tuple[Any, dict[str, Any]]:
     import sys
 
@@ -182,6 +188,9 @@ def build_environment(
     env = Environment(node_type_list=["VEHICLE"], standardization=standardization(feature_mode))
     env.attention_radius = {(env.NodeType.VEHICLE, env.NodeType.VEHICLE): 100.0}
     arrays = load_arrays(data_dir)
+    iterable = np.asarray(indices, dtype=np.int64)
+    if progress and tqdm is not None:
+        iterable = tqdm(iterable, desc=f"{dataset_name} {split} scenes", ncols=80, file=sys.stdout)
     scenes = [
         _sample_to_scene(
             arrays,

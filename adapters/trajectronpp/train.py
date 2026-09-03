@@ -347,9 +347,24 @@ def prepare_data(cfg: dict[str, Any], upstream_dir: Path, output_dir: Path) -> t
     for split in ("train", "val", "test"):
         limit = cfg["max_train_samples"] if split == "train" else cfg["max_eval_samples"]
         indices = subset_indices(np.load(split_indices_path(data_root, cfg["dataset"], split)), limit)
-        env, report = build_environment(data_path, indices, cfg["dataset"], cfg["feature_mode"], split, upstream_dir, dt=float(cfg["dt"]))
+        print(
+            f"[DATA] Building {split}_env.pkl from {len(indices):,} {cfg['dataset']} "
+            f"{cfg['feature_mode']} samples...",
+            flush=True,
+        )
+        env, report = build_environment(
+            data_path,
+            indices,
+            cfg["dataset"],
+            cfg["feature_mode"],
+            split,
+            upstream_dir,
+            dt=float(cfg["dt"]),
+            progress=True,
+        )
         write_environment(proc_dir / f"{split}_env.pkl", env)
         write_report(output_dir / f"{split}_data_report.json", report)
+        print(f"[DATA] Wrote {proc_dir / f'{split}_env.pkl'}", flush=True)
         reports[split] = report
     return proc_dir, reports
 
@@ -389,6 +404,15 @@ def main(argv: list[str] | None = None) -> int:
     ckpt_dir.mkdir(parents=True, exist_ok=True)
     log_dir.mkdir(parents=True, exist_ok=True)
 
+    print(
+        f"[INFO] Trajectron++ adapter: mode={cfg['mode']} dataset={cfg['dataset']} "
+        f"feature_mode={cfg['feature_mode']} seed={cfg['seed']}",
+        flush=True,
+    )
+    print(f"[INFO] Output dir : {output_dir}", flush=True)
+    print(f"[INFO] Upstream   : {upstream_dir}", flush=True)
+    print(f"[INFO] Torch CUDA : available={torch.cuda.is_available()} cuda={torch.version.cuda}", flush=True)
+
     proc_dir, reports = prepare_data(cfg, upstream_dir, output_dir)
     hyperparams = trajectron_config(cfg)
     conf_path = output_dir / "trajectron_config.json"
@@ -415,9 +439,11 @@ def main(argv: list[str] | None = None) -> int:
     if device == "auto":
         device = "cuda:0" if torch.cuda.is_available() else "cpu"
     eval_device = device
+    print(f"[INFO] Device     : {device}", flush=True)
     before = {p for p in log_dir.glob(f"models_*_{cfg['exp_tag']}") if p.is_dir()}
     cmd = [
         sys.executable,
+        "-u",
         str(upstream_dir / "trajectron" / "train.py"),
         "--conf",
         str(conf_path),
@@ -458,18 +484,30 @@ def main(argv: list[str] | None = None) -> int:
     started = time.time()
     with log_path.open("w", encoding="utf-8") as log_file:
         log_file.write(" ".join(shlex.quote(x) for x in cmd) + "\n\n")
-        proc = subprocess.run(
+        log_file.flush()
+        print(f"[INFO] Launching upstream Trajectron++ training. Log: {log_path}", flush=True)
+        proc = subprocess.Popen(
             cmd,
             cwd=str(upstream_dir / "trajectron"),
-            env={**os.environ, "PYTHONPATH": f"{upstream_dir}:{upstream_dir / 'trajectron'}:{os.environ.get('PYTHONPATH', '')}"},
+            env={
+                **os.environ,
+                "PYTHONPATH": f"{upstream_dir}:{upstream_dir / 'trajectron'}:{os.environ.get('PYTHONPATH', '')}",
+                "PYTHONUNBUFFERED": "1",
+            },
             text=True,
-            stdout=log_file,
+            stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
-            check=False,
+            bufsize=1,
         )
-    if proc.returncode != 0:
+        assert proc.stdout is not None
+        for line in proc.stdout:
+            print(line, end="", flush=True)
+            log_file.write(line)
+            log_file.flush()
+        returncode = proc.wait()
+    if returncode != 0:
         tail = "\n".join(log_path.read_text(encoding="utf-8", errors="replace").splitlines()[-40:])
-        raise SystemExit(f"Upstream Trajectron++ training failed with exit code {proc.returncode}.\n{tail}")
+        raise SystemExit(f"Upstream Trajectron++ training failed with exit code {returncode}.\n{tail}")
 
     model_dir = latest_model_dir(log_dir, cfg["exp_tag"], before)
     if model_dir is None:
