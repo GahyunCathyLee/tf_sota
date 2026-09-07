@@ -23,6 +23,7 @@ training:
   epochs: 100
   lr: 0.0001
   weight_decay: 0.01
+  log_interval: 1500
   accelerator: "auto"
   num_workers: 4
   output_dir: "runs/mtrpp/{dataset}/{feature_mode}/{exp_tag}"
