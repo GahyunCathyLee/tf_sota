@@ -315,6 +315,9 @@ class NeighFormerBATDataset:
         def zeros(*shape: int):
             return torch.zeros(*shape, dtype=torch.float32)
 
+        def tensor_from(array: np.ndarray):
+            return torch.from_numpy(np.asarray(array).copy())
+
         batch = {
             "hist": zeros(t_h, bsz, 2),
             "nbrs": zeros(t_h, n_nbr, 2),
@@ -344,12 +347,12 @@ class NeighFormerBATDataset:
         for b, sample in enumerate(samples):
             for key in ("hist", "hist_relative", "fut", "va", "lane", "cls"):
                 dest = key if key != "fut" else "fut"
-                batch[dest][:, b] = torch.from_numpy(sample[key])
-            batch["lat_enc"][b] = torch.from_numpy(sample["lat_enc"])
-            batch["lon_enc"][b] = torch.from_numpy(sample["lon_enc"])
-            batch["feature_matrix"][:, b] = torch.from_numpy(sample["feature_matrix"])
-            batch["behavior"][:, b] = torch.from_numpy(sample["behavior"])
-            batch["target"][b] = torch.from_numpy(sample["target_cart"])
+                batch[dest][:, b] = tensor_from(sample[key])
+            batch["lat_enc"][b] = tensor_from(sample["lat_enc"])
+            batch["lon_enc"][b] = tensor_from(sample["lon_enc"])
+            batch["feature_matrix"][:, b] = tensor_from(sample["feature_matrix"])
+            batch["behavior"][:, b] = tensor_from(sample["behavior"])
+            batch["target"][b] = tensor_from(sample["target_cart"])
             batch["sample_index"][b] = int(sample["sample_index"])
 
         for n, (b, cell, sample) in enumerate(neighbor_cells):
@@ -364,7 +367,7 @@ class NeighFormerBATDataset:
                 ("nbrslane", "nbrslane"),
                 ("nbrscls", "nbrscls"),
             ):
-                batch[dst][:, n] = torch.from_numpy(sample[src][cell])
+                batch[dst][:, n] = tensor_from(sample[src][cell])
         return batch
 
     def describe(self, num_samples: int | None = None) -> dict[str, Any]:
