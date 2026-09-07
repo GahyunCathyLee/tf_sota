@@ -68,6 +68,8 @@ def detect_adapter(config: Path) -> str:
         return "hivt"
     if "/par/" in str(config).replace("\\", "/"):
         return "par"
+    if "/bat/" in str(config).replace("\\", "/"):
+        return "bat"
     if "/simpl/" in str(config).replace("\\", "/"):
         return "simpl"
     return "qcnet"
@@ -86,6 +88,8 @@ def main(argv: list[str] | None = None) -> int:
         from adapters.simpl.train import main as adapter_main
     elif adapter == "par":
         from adapters.par.train import main as adapter_main
+    elif adapter == "bat":
+        from adapters.bat.train import main as adapter_main
     elif adapter == "qcnet":
         from adapters.qcnet.train import main as adapter_main
     elif adapter == "trajectronpp":

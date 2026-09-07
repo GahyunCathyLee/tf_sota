@@ -1,0 +1,8 @@
+# Shared base for the BAT seed sweep.
+
+base: ../models/bat.yaml
+
+training:
+  output_dir: "runs/bat/{dataset}/{feature_mode}/{exp_tag}"
+  ckpt_dir: "ckpts/bat"
+  processed_dir: "processed/bat"

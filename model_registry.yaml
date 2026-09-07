@@ -47,6 +47,18 @@ models:
     implementation_priority: 5
     compute_tier: "single_gpu"
 
+  bat:
+    display_name: "BAT"
+    paper: "BAT: Behavior-Aware Human-Like Trajectory Prediction for Autonomous Driving"
+    upstream_url: "https://github.com/Petrichor625/BATraj-Behavior-aware-Model.git"
+    upstream_type: "official_reconstructed"
+    license: "check_upstream"
+    original_datasets: ["NGSIM"]
+    local_status: "cloned:external/bat"
+    feature_strategy: "Convert NeighFormer highD/exiD windows to BAT NGSIM-style hist/nbr/future tensors, 13x3 social grid, and behavior centrality features; map dim/I into BAT scalar neighbor side features."
+    implementation_priority: 5
+    compute_tier: "single_gpu"
+
   simpl:
     display_name: "SIMPL"
     paper: "A Simple and Efficient Multi-agent Motion Prediction Baseline for Autonomous Driving"

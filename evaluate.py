@@ -7,12 +7,12 @@ import argparse
 import sys
 from pathlib import Path
 
-import torch
-
 ROOT = Path(__file__).resolve().parent
 
 
 def load_checkpoint(path: Path):
+    import torch
+
     try:
         return torch.load(path, map_location="cpu", weights_only=False)
     except TypeError:
@@ -30,6 +30,8 @@ def detect_adapter(ckpt_path: Path) -> str:
         return "hivt"
     if "/par/" in str(path).replace("\\", "/"):
         return "par"
+    if "/bat/" in str(path).replace("\\", "/"):
+        return "bat"
     if "model_cfg" in ckpt or "/simpl/" in str(path).replace("\\", "/"):
         return "simpl"
     return "qcnet"
@@ -49,6 +51,8 @@ def main(argv: list[str] | None = None) -> int:
         from adapters.simpl.evaluate import main as adapter_main
     elif adapter == "par":
         from adapters.par.evaluate import main as adapter_main
+    elif adapter == "bat":
+        from adapters.bat.evaluate import main as adapter_main
     elif adapter == "qcnet":
         from adapters.qcnet.evaluate import main as adapter_main
     elif adapter == "trajectronpp":

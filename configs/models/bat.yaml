@@ -1,0 +1,87 @@
+adapter: bat
+model: bat
+display_name: "BAT"
+upstream_dir: "external/bat"
+adapter_dir: "adapters/bat"
+
+data:
+  root: "/home/gahyun/neighformer/data"
+  hz: 3.0
+  dt: 0.32
+
+input:
+  coordinate_frame: "ego_centered_polar_for_bat"
+  uses_map: false
+  social_grid: [13, 3]
+  max_grid_vehicles: 39
+  ego_channels: 6
+  neighbor_baseline_channels: 6
+  raw_neighbor_channels: 10
+  neighbor_dimI_channels: 8
+
+training:
+  mode: full
+  batch_size: 32
+  epochs: 100
+  lr: 0.001
+  weight_decay: 0.0
+  clip: 10.0
+  log_interval: 100
+  accelerator: "auto"
+  num_workers: 4
+  output_dir: "runs/bat/{dataset}/{feature_mode}/{exp_tag}"
+  ckpt_dir: "ckpts/bat"
+  processed_dir: "processed/bat"
+  reuse_processed: false
+
+model:
+  lstm_encoder_size: 64
+  lstm_encoder_size_behavior: 16
+  lstm_encoder_carnum: 39
+  n_head: 4
+  att_out: 48
+  f_length: 12
+  traj_linear_hidden: 32
+  behavior_size: 6
+  traj_linear_behavior: 4
+  use_elu: true
+  dropout: 0.0
+  relu: 0.1
+  lat_length: 3
+  lon_length: 3
+  use_true_man: false
+  use_maneuvers: true
+  cat_pred: true
+  use_mse: false
+  pre_epoch: 7
+  val_use_mse: true
+  polar: true
+  grid_cols: 13
+  grid_rows: 3
+  longitudinal_cell: 15.0
+  lane_width: 3.7
+  neighbor_distance: 100.0
+
+runtime:
+  seed: 42
+  n_workers: 4
+
+smoke:
+  epochs: 1
+  batch_size: 4
+  train_samples: 64
+  eval_samples: 32
+  num_workers: 0
+  model_hparams:
+    lstm_encoder_size: 32
+    lstm_encoder_size_behavior: 8
+    traj_linear_hidden: 16
+    traj_linear_behavior: 4
+    n_head: 2
+    att_out: 16
+
+notes:
+  - "Uses the official BAT GDEncoder and Generator modules from https://github.com/Petrichor625/BATraj-Behavior-aware-Model."
+  - "The released upstream data/train scripts are hard-coded for NGSIM .mat files; this adapter replaces only the data/input loop."
+  - "NeighFormer kinematics are converted to BAT's 13x3 social grid and behavior centrality tensors."
+  - "dimI mode maps neighbor dim to BAT's class scalar and I to BAT's lane scalar; ego uses neutral fills."
