@@ -486,6 +486,15 @@ def main(argv: list[str] | None = None) -> int:
     requested_device = str(cfg["device"]).lower()
     use_cuda = requested_device in {"auto", "gpu", "cuda"} and torch.cuda.is_available()
     device = torch.device("cuda" if use_cuda else "cpu")
+
+    effective_global_fallback = bool(force_global or using_cuda_op_stubs())
+    if cfg["mode"] == "full" and effective_global_fallback and not force_global:
+        print(
+            "[WARN] MTR++ CUDA ops (knn_cuda, attention_cuda) are not built; "
+            "continuing with the adapter's global-attention compatibility fallback. "
+            "For the original local-attention path, run: bash scripts/build_mtrpp_cuda_ops.sh",
+            flush=True,
+        )
     intention_file = out_root / "intention_points.pkl"
     build_intention_points_from_data(
         data_path,
@@ -514,7 +523,11 @@ def main(argv: list[str] | None = None) -> int:
     print(f"data     : {data_path}", flush=True)
     print(f"samples  : train={len(train_ds):,} val={len(val_ds):,}", flush=True)
     print(f"mode     : {cfg['mode']}  epochs={cfg['epochs']}  batch_size={cfg['batch_size']}", flush=True)
-    print(f"device   : {device}  cuda_op_stubs={using_cuda_op_stubs()}  global_fallback={force_global}", flush=True)
+    print(
+        f"device   : {device}  cuda_op_stubs={using_cuda_op_stubs()} "
+        f"global_fallback={effective_global_fallback}",
+        flush=True,
+    )
 
     for epoch in range(start_epoch, int(cfg["epochs"])):
         model.train()

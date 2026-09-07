@@ -94,6 +94,52 @@ def _patch_cuda_noop_for_cpu() -> None:
     torch.Tensor._sota_mtrpp_cuda_noop = True
 
 
+def _patch_encoder_global_attn_mask() -> None:
+    """Fix an upstream shape bug in MTREncoder.apply_global_attn.
+
+    Upstream permutes the padding mask as if it were 3D::
+
+        x_mask_t = x_mask.permute(1, 0, 2)
+
+    but x_mask is (batch_size, N), so this raises. The mask feeds
+    MultiheadAttention's ``key_padding_mask``, which is batch-first even though
+    ``src`` is seq-first, so it should not be permuted at all -- matching how
+    MTRDecoder passes ``memory_key_padding_mask=~kv_mask`` unpermuted.
+
+    The bug is invisible upstream because MTR++ always runs with local attention;
+    only the global-attention fallback reaches this code.
+    """
+    try:
+        from mtr.models.context_encoder.mtr_encoder import MTREncoder
+        from mtr.models.utils.transformer import position_encoding_utils
+    except ImportError:
+        return
+    if getattr(MTREncoder, "_sota_mtrpp_global_attn_mask_fix", False):
+        return
+
+    import torch
+
+    def apply_global_attn(self, x, x_mask, x_pos):
+        assert torch.all(x_mask.sum(dim=-1) > 0)
+
+        batch_size, N, d_model = x.shape
+        x_t = x.permute(1, 0, 2)
+        x_pos_t = x_pos.permute(1, 0, 2)
+
+        pos_embedding = position_encoding_utils.gen_sineembed_for_position(x_pos_t, hidden_dim=d_model)
+
+        for k in range(len(self.self_attn_layers)):
+            x_t = self.self_attn_layers[k](
+                src=x_t,
+                src_key_padding_mask=~x_mask,
+                pos=pos_embedding,
+            )
+        return x_t.permute(1, 0, 2)  # (batch_size, N, d_model)
+
+    MTREncoder.apply_global_attn = apply_global_attn
+    MTREncoder._sota_mtrpp_global_attn_mask_fix = True
+
+
 def _patch_global_attention_fallback(force: bool = False) -> None:
     if not (force or _STUBBED_CUDA_OPS):
         return
@@ -169,6 +215,7 @@ def import_motion_transformer(path: str | Path | None = None, global_attention_f
             "for full local-attention runs also build MTR CUDA ops with `python setup.py develop` "
             f"inside {upstream}."
         ) from exc
+    _patch_encoder_global_attn_mask()
     _patch_global_attention_fallback(force=global_attention_fallback)
     return MotionTransformer, mtr_global_cfg, upstream
 
