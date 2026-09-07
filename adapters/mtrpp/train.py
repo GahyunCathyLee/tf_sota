@@ -106,7 +106,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--processed-dir", type=Path)
     p.add_argument("--reuse-processed", action="store_true")
     p.add_argument("--exp-tag")
-    p.add_argument("--epochs", type=int)
+    p.add_argument("--epochs", "--epoch", dest="epochs", type=int)
     p.add_argument("--batch-size", type=int)
     p.add_argument("--num-workers", type=int)
     p.add_argument("--seed", type=int)
@@ -242,6 +242,8 @@ def apply_cli(cfg: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]:
         value = getattr(args, cli_name)
         if value is not None:
             cfg[cfg_name] = value
+    if args.output_dir is not None and args.ckpt_dir is None:
+        cfg["ckpt_dir"] = Path(args.output_dir) / "ckpts"
     if args.reuse_processed:
         cfg["reuse_processed"] = True
     if args.global_attention_fallback:
