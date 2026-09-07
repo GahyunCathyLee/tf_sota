@@ -17,7 +17,7 @@ EXPERIMENT_ROOT = ADAPTER_DIR.parents[1]
 sys.path.insert(0, str(EXPERIMENT_ROOT))
 
 from adapters.common import dataset_dir, split_indices_path  # noqa: E402
-from adapters.mtrpp.dataset import NeighFormerMTRDataset  # noqa: E402
+from adapters.mtrpp.dataset import NeighFormerMTRDataset, build_intention_points_from_data, processed_root  # noqa: E402
 from adapters.mtrpp.train import (  # noqa: E402
     build_builder_kwargs,
     format_path_template,
@@ -109,16 +109,42 @@ def main(argv: list[str] | None = None) -> int:
     model_cfg = to_attrdict(ckpt["model_cfg"])
     upstream_dir = args.upstream_dir or cfg.get("upstream_dir")
     force_global = bool(args.global_attention_fallback or cfg.get("global_attention_fallback", False))
+    device = torch.device(args.device) if args.device else torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    data_root = resolve_path(args.data_root) if args.data_root else resolve_path(cfg["data_root"])
+    cfg = {**cfg, "data_root": str(data_root)}
+    data_path = dataset_dir(data_root, cfg["dataset"])
+    processed_dir = resolve_path(args.processed_dir) if args.processed_dir else resolve_path(cfg.get("processed_dir", "processed/mtrpp"))
+    default_intention_file = processed_root(processed_dir, cfg["dataset"], cfg["feature_mode"]) / "intention_points.pkl"
+    intention_file = Path(model_cfg.MOTION_DECODER.INTENTION_POINTS_FILE)
+    if not intention_file.is_absolute():
+        intention_file = (EXPERIMENT_ROOT / intention_file).resolve()
+    if not intention_file.exists():
+        print(f"[WARN] intention points missing: {intention_file}; regenerating from train split.", flush=True)
+        train_indices = np.load(split_indices_path(data_root, cfg["dataset"], "train"))
+        fallback_file = intention_file
+        try:
+            build_intention_points_from_data(
+                data_path,
+                train_indices,
+                fallback_file,
+                num_modes=int(model_cfg.MOTION_DECODER.NUM_MOTION_MODES),
+            )
+        except OSError:
+            fallback_file = default_intention_file
+            build_intention_points_from_data(
+                data_path,
+                train_indices,
+                fallback_file,
+                num_modes=int(model_cfg.MOTION_DECODER.NUM_MOTION_MODES),
+            )
+        model_cfg.MOTION_DECODER.INTENTION_POINTS_FILE = str(fallback_file)
+        print(f"[INFO] intention points regenerated -> {fallback_file}", flush=True)
+
     MotionTransformer, mtr_global_cfg, resolved_upstream = import_motion_transformer(
         upstream_dir,
         global_attention_fallback=force_global,
     )
     mtr_global_cfg.ROOT_DIR = EXPERIMENT_ROOT
-
-    device = torch.device(args.device) if args.device else torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    data_root = resolve_path(args.data_root) if args.data_root else resolve_path(cfg["data_root"])
-    cfg = {**cfg, "data_root": str(data_root)}
-    data_path = dataset_dir(data_root, cfg["dataset"])
     indices = np.load(split_indices_path(data_root, cfg["dataset"], args.split))
     if args.max_samples is not None:
         indices = indices[: args.max_samples]
@@ -126,7 +152,6 @@ def main(argv: list[str] | None = None) -> int:
         cfg["batch_size"] = args.batch_size
     if args.num_workers is not None:
         cfg["num_workers"] = args.num_workers
-    processed_dir = resolve_path(args.processed_dir) if args.processed_dir else resolve_path(cfg.get("processed_dir", "processed/mtrpp"))
     ds = NeighFormerMTRDataset(
         data_path,
         indices,
