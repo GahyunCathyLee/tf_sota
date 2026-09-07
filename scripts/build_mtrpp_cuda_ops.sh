@@ -11,10 +11,22 @@
 set -euo pipefail
 
 UPSTREAM="${1:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/external/mtrpp}"
+MAX_JOBS="${MAX_JOBS:-$(python - <<'PY'
+import os
+print(max(1, min(8, os.cpu_count() or 2)))
+PY
+)}"
+export MAX_JOBS
 
 echo "== environment =="
 python -c "import torch; print('torch      :', torch.__version__); print('torch cuda :', torch.version.cuda); print('available  :', torch.cuda.is_available())"
 nvcc --version | tail -2 || { echo "nvcc not found - install the CUDA toolkit"; exit 1; }
+
+if ! python -c "import ninja" >/dev/null 2>&1; then
+    echo "== installing ninja =="
+    python -m pip install -q ninja
+fi
+python -c "import ninja; print('ninja     :', ninja.__file__)"
 
 # nvcc and torch must agree on the CUDA major version, or the extension will
 # build but fail to load with an undefined-symbol error.
@@ -40,9 +52,11 @@ print(';'.join(sorted(archs)) or '7.0;7.5;8.0;8.6')
     export TORCH_CUDA_ARCH_LIST
 fi
 echo "arch list  : $TORCH_CUDA_ARCH_LIST"
+echo "max jobs   : $MAX_JOBS"
 
 echo "== building in $UPSTREAM =="
 cd "$UPSTREAM"
+rm -rf build
 python setup.py build_ext --inplace
 
 echo "== verifying =="

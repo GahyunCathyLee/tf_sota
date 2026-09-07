@@ -101,7 +101,11 @@ def _patch_encoder_global_attn_mask() -> None:
 
         x_mask_t = x_mask.permute(1, 0, 2)
 
-    but x_mask is (batch_size, N), so this raises. The mask feeds
+    but x_mask is (batch_size, N), so this raises. The same fallback also needs
+    to pass only xy positions to MTR's sine encoder because it accepts 2D or 4D
+    tensors, while MTR token positions are stored as xyz.
+
+    The mask feeds
     MultiheadAttention's ``key_padding_mask``, which is batch-first even though
     ``src`` is seq-first, so it should not be permuted at all -- matching how
     MTRDecoder passes ``memory_key_padding_mask=~kv_mask`` unpermuted.
@@ -124,7 +128,7 @@ def _patch_encoder_global_attn_mask() -> None:
 
         batch_size, N, d_model = x.shape
         x_t = x.permute(1, 0, 2)
-        x_pos_t = x_pos.permute(1, 0, 2)
+        x_pos_t = x_pos[:, :, 0:2].permute(1, 0, 2)
 
         pos_embedding = position_encoding_utils.gen_sineembed_for_position(x_pos_t, hidden_dim=d_model)
 
