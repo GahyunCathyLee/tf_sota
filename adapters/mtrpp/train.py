@@ -310,6 +310,7 @@ def build_builder_kwargs(cfg: dict[str, Any], hp: dict[str, Any] | None = None) 
 
 def build_model_config(cfg: dict[str, Any], ds: NeighFormerMTRDataset, intention_file: Path) -> AttrDict:
     hp = cfg.get("model_hparams") or {}
+    effective_global_fallback = bool(cfg.get("effective_global_attention_fallback", False))
     d_model = int(hp.get("d_model", 256))
     map_d_model = int(hp.get("map_d_model", d_model))
     heads = int(hp.get("num_attn_head", 8))
@@ -328,7 +329,7 @@ def build_model_config(cfg: dict[str, Any], ds: NeighFormerMTRDataset, intention
             "NUM_ATTN_LAYERS": int(hp.get("num_attn_layers", 6)),
             "NUM_ATTN_HEAD": heads,
             "DROPOUT_OF_ATTN": float(hp.get("dropout", 0.1)),
-            "USE_LOCAL_ATTN": bool(hp.get("use_local_attn", False)),
+            "USE_LOCAL_ATTN": bool(hp.get("use_local_attn", True)) and not effective_global_fallback,
         },
         "MOTION_DECODER": {
             "NAME": "MTRDecoder",
@@ -488,6 +489,7 @@ def main(argv: list[str] | None = None) -> int:
     device = torch.device("cuda" if use_cuda else "cpu")
 
     effective_global_fallback = bool(force_global or using_cuda_op_stubs())
+    cfg["effective_global_attention_fallback"] = effective_global_fallback
     if cfg["mode"] == "full" and effective_global_fallback and not force_global:
         print(
             "[WARN] MTR++ CUDA ops (knn_cuda, attention_cuda) are not built; "

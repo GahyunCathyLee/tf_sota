@@ -44,7 +44,7 @@ model:
   num_points_each_polyline: 20
   num_base_map_polylines: 64
   num_waypoint_map_polylines: 32
-  use_local_attn: false
+  use_local_attn: true
   lane_half_length: 160.0
   lane_width: 3.7
 

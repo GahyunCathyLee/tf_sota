@@ -144,6 +144,72 @@ def _patch_encoder_global_attn_mask() -> None:
     MTREncoder._sota_mtrpp_global_attn_mask_fix = True
 
 
+def _patch_encoder_layer_global_kwargs() -> None:
+    """Allow the upstream encoder layer's non-local attention branch to run.
+
+    MTR's TransformerEncoderLayer forwards local-attention-only kwargs even when
+    ``self.self_attn`` is the global MultiheadAttention implementation. The
+    official configs use local attention, but the adapter's debug fallback needs
+    this branch to be valid.
+    """
+    try:
+        from mtr.models.utils.transformer.transformer_encoder_layer import TransformerEncoderLayer
+    except ImportError:
+        return
+    if getattr(TransformerEncoderLayer, "_sota_mtrpp_global_kwargs_fix", False):
+        return
+
+    def forward_post(self, src, src_mask=None, src_key_padding_mask=None, pos=None,
+                     index_pair=None, query_batch_cnt=None, key_batch_cnt=None, index_pair_batch=None):
+        q = k = self.with_pos_embed(src, pos)
+        if self.use_local_attn:
+            src2 = self.self_attn(
+                q,
+                k,
+                value=src,
+                attn_mask=src_mask,
+                key_padding_mask=src_key_padding_mask,
+                index_pair=index_pair,
+                query_batch_cnt=query_batch_cnt,
+                key_batch_cnt=key_batch_cnt,
+                index_pair_batch=index_pair_batch,
+            )[0]
+        else:
+            src2 = self.self_attn(q, k, value=src, attn_mask=src_mask, key_padding_mask=src_key_padding_mask)[0]
+        src = src + self.dropout1(src2)
+        src = self.norm1(src)
+        src2 = self.linear2(self.dropout(self.activation(self.linear1(src))))
+        src = src + self.dropout2(src2)
+        return self.norm2(src)
+
+    def forward_pre(self, src, src_mask=None, src_key_padding_mask=None, pos=None,
+                    index_pair=None, query_batch_cnt=None, key_batch_cnt=None, index_pair_batch=None):
+        src2 = self.norm1(src)
+        q = k = self.with_pos_embed(src2, pos)
+        if self.use_local_attn:
+            src2 = self.self_attn(
+                q,
+                k,
+                value=src,
+                attn_mask=src_mask,
+                key_padding_mask=src_key_padding_mask,
+                index_pair=index_pair,
+                query_batch_cnt=query_batch_cnt,
+                key_batch_cnt=key_batch_cnt,
+                index_pair_batch=index_pair_batch,
+            )[0]
+        else:
+            src2 = self.self_attn(q, k, value=src, attn_mask=src_mask, key_padding_mask=src_key_padding_mask)[0]
+        src = src + self.dropout1(src2)
+        src2 = self.norm2(src)
+        src2 = self.linear2(self.dropout(self.activation(self.linear1(src2))))
+        return src + self.dropout2(src2)
+
+    TransformerEncoderLayer.forward_post = forward_post
+    TransformerEncoderLayer.forward_pre = forward_pre
+    TransformerEncoderLayer._sota_mtrpp_global_kwargs_fix = True
+
+
 def _patch_global_attention_fallback(force: bool = False) -> None:
     if not (force or _STUBBED_CUDA_OPS):
         return
@@ -220,6 +286,7 @@ def import_motion_transformer(path: str | Path | None = None, global_attention_f
             f"inside {upstream}."
         ) from exc
     _patch_encoder_global_attn_mask()
+    _patch_encoder_layer_global_kwargs()
     _patch_global_attention_fallback(force=global_attention_fallback)
     return MotionTransformer, mtr_global_cfg, upstream
 
