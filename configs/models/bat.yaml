@@ -26,7 +26,7 @@ training:
   lr: 0.001
   weight_decay: 0.0
   clip: 10.0
-  log_interval: 100
+  log_interval: 1000
   accelerator: "auto"
   num_workers: 4
   output_dir: "runs/bat/{dataset}/{feature_mode}/{exp_tag}"
