@@ -1,12 +1,16 @@
-"""Metrics and report tables, matching `neighformer/src/metrics.py` exactly.
+"""Trajectory metrics for ego-only and multi-agent evaluation.
 
-The definitions below are deliberately identical to NeighFormer's so that
-MTP-GO numbers can be put next to EncDecFormer numbers without a conversion:
+For single-agent predictors this reduces to the NeighFormer convention:
 
     ade  = mean_samples( mean_t ||pred - y|| )
     fde  = mean_samples( ||pred_T - y_T|| )
     rmse = mean_samples( sqrt( mean_t ||pred - y||^2 ) )      <- per-sample sqrt
     rmse@Ns = sqrt( sum_samples ||pred_i - y_i||^2 / n ),  i = int(N * hz) - 1
+
+For multi-agent predictors, each valid target agent trajectory is treated as
+one scored sample and metrics are averaged over all scored agents. Partially
+observed futures are handled with a timestep mask: ADE/RMSE use valid future
+steps and FDE uses the last valid future step for that agent.
 
 `hz` is the reporting convention inherited from NeighFormer configs (3.0),
 which is not exactly 1/dt (dt = 0.32 s -> 3.125 Hz). The index formula is kept
@@ -62,10 +66,12 @@ class MetricAccumulator:
         self.sum_rmse = 0.0
         self.sum_min_ade = 0.0
         self.sum_min_fde = 0.0
+        self.n_min = 0
         self.sum_nll = 0.0
         self.n_nll = 0
         self._step_abs: np.ndarray | None = None   # (T,) sum of L2 per step
         self._step_sq: np.ndarray | None = None    # (T,) sum of squared L2 per step
+        self._step_count: np.ndarray | None = None  # (T,) valid agents per step
         # {label: [sum_ade, sum_fde, sum_rmse, count]}
         self.event_stats: dict[str, list] = defaultdict(lambda: [0.0, 0.0, 0.0, 0])
         self.state_stats: dict[str, list] = defaultdict(lambda: [0.0, 0.0, 0.0, 0])
@@ -77,6 +83,7 @@ class MetricAccumulator:
         pred: torch.Tensor,
         target: torch.Tensor,
         all_modes: torch.Tensor | None = None,
+        valid_mask: torch.Tensor | None = None,
         nll: float | None = None,
         labels: list[dict[str, str] | None] | None = None,
     ) -> None:
@@ -84,33 +91,66 @@ class MetricAccumulator:
         pred      : (B, T, 2) most-likely trajectory
         target    : (B, T, 2)
         all_modes : (B, T, m, 2) every mixture component, for minADE/minFDE
+        valid_mask: (B, T) valid target timesteps; defaults to all-valid
         labels    : per-sample {"event_label": ..., "state_label": ...} or None
         """
+        if pred.ndim != 3 or target.ndim != 3:
+            raise ValueError(f"pred/target must be (B, T, 2), got {pred.shape} and {target.shape}")
+        if pred.shape != target.shape:
+            raise ValueError(f"pred/target shape mismatch: {pred.shape} vs {target.shape}")
+
+        device = pred.device
+        if valid_mask is None:
+            valid_mask = torch.ones(pred.shape[:2], dtype=torch.bool, device=device)
+        else:
+            valid_mask = valid_mask.to(device=device, dtype=torch.bool)
+        valid_agent = valid_mask.any(dim=-1)
+        if not bool(valid_agent.any()):
+            return
+
+        pred = pred[valid_agent]
+        target = target[valid_agent]
+        valid_mask = valid_mask[valid_agent]
+        if all_modes is not None:
+            all_modes = all_modes[valid_agent]
+        if labels is not None:
+            labels = [lab for lab, keep in zip(labels, valid_agent.detach().cpu().tolist()) if keep]
+
         b = pred.shape[0]
         dist = torch.norm(pred - target, dim=-1)             # (B, T)
-        a = dist.mean(dim=-1)                                # (B,)
-        f = dist[:, -1]                                      # (B,)
-        r = dist.pow(2).mean(dim=-1).sqrt()                  # (B,)
+        valid_f = valid_mask.float()
+        counts = valid_f.sum(dim=-1).clamp_min(1.0)
+        masked_dist = dist * valid_f
+        a = masked_dist.sum(dim=-1) / counts                 # (B,)
+        r = (dist.pow(2) * valid_f).sum(dim=-1).div(counts).sqrt()
+        last_valid = valid_mask.long().sum(dim=-1) - 1
+        f = dist[torch.arange(b, device=device), last_valid]  # (B,)
 
         self.sum_ade += float(a.sum())
         self.sum_fde += float(f.sum())
         self.sum_rmse += float(r.sum())
         self.n += b
 
-        step_abs = dist.double().sum(dim=0).cpu().numpy()
-        step_sq = dist.double().pow(2).sum(dim=0).cpu().numpy()
+        step_abs = (dist.double() * valid_mask.double()).sum(dim=0).cpu().numpy()
+        step_sq = (dist.double().pow(2) * valid_mask.double()).sum(dim=0).cpu().numpy()
+        step_count = valid_mask.double().sum(dim=0).cpu().numpy()
         if self._step_abs is None:
             self._step_abs = np.zeros_like(step_abs)
             self._step_sq = np.zeros_like(step_sq)
+            self._step_count = np.zeros_like(step_count)
         self._step_abs += step_abs
         self._step_sq += step_sq
+        self._step_count += step_count
 
         if all_modes is not None:
             mode_dist = torch.norm(all_modes - target.unsqueeze(2), dim=-1)   # (B, T, m)
-            best = mode_dist.mean(dim=1).argmin(dim=-1)                       # (B,)
-            best_dist = mode_dist[torch.arange(b, device=pred.device), :, best]
-            self.sum_min_ade += float(best_dist.mean(dim=-1).sum())
-            self.sum_min_fde += float(best_dist[:, -1].sum())
+            mode_ade = (mode_dist * valid_f.unsqueeze(-1)).sum(dim=1) / counts.unsqueeze(-1)
+            best = mode_ade.argmin(dim=-1)                                    # (B,)
+            best_dist = mode_dist[torch.arange(b, device=device), :, best]
+            final_mode_dist = mode_dist[torch.arange(b, device=device), last_valid]
+            self.sum_min_ade += float((best_dist * valid_f).sum(dim=-1).div(counts).sum())
+            self.sum_min_fde += float(final_mode_dist.min(dim=-1).values.sum())
+            self.n_min += b
 
         if nll is not None and math.isfinite(nll):
             self.sum_nll += float(nll)
@@ -131,15 +171,19 @@ class MetricAccumulator:
                     acc[name][3] += 1
 
     def result(self) -> dict[str, Any]:
-        if self.n == 0 or self._step_abs is None:
+        if self.n == 0 or self._step_abs is None or self._step_count is None:
             return {"n_samples": 0}
         n = float(self.n)
-        step_rmse = np.sqrt(self._step_sq / n)
-        step_ade = self._step_abs / n
+        step_rmse = np.full_like(self._step_sq, np.nan, dtype=np.float64)
+        step_ade = np.full_like(self._step_abs, np.nan, dtype=np.float64)
+        valid_steps = self._step_count > 0
+        step_rmse[valid_steps] = np.sqrt(self._step_sq[valid_steps] / self._step_count[valid_steps])
+        step_ade[valid_steps] = self._step_abs[valid_steps] / self._step_count[valid_steps]
         horizon = [round((t + 1) * self.dt, 4) for t in range(len(step_ade))]
 
         out: dict[str, Any] = {
             "n_samples": int(self.n),
+            "n_agent_trajectories": int(self.n),
             "ade": self.sum_ade / n,
             "fde": self.sum_fde / n,
             "rmse": self.sum_rmse / n,
@@ -148,10 +192,12 @@ class MetricAccumulator:
             "horizon_seconds": horizon,
             "step_rmse": [float(v) for v in step_rmse],
             "step_ade": [float(v) for v in step_ade],
+            "step_valid_count": [int(v) for v in self._step_count],
         }
-        if self.sum_min_ade:
-            out["min_ade"] = self.sum_min_ade / n
-            out["min_fde"] = self.sum_min_fde / n
+        if self.n_min:
+            n_min = float(self.n_min)
+            out["min_ade"] = self.sum_min_ade / n_min
+            out["min_fde"] = self.sum_min_fde / n_min
         if self.n_nll:
             out["nll"] = self.sum_nll / self.n_nll
 

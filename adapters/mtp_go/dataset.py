@@ -22,11 +22,10 @@ Edges are rebuilt per history step exactly like upstream ``_build_edges``:
 fully connected (self-loops included) over the nodes present at that step, with
 a single scalar edge feature = Euclidean distance in the ego-relative frame.
 
-Targets: only the ego node has a future in the NeighFormer schema, so
-``tar_real_mask`` is True for node 0 only. Future graph topology is unknown
-(neighbour futures are not stored), so the last observed history graph is reused
-for every future step. This is an explicit approximation of upstream, which
-builds future edges from ground-truth future neighbour positions.
+Targets: canonical NeighFormer arrays contain only the ego future. If
+``y_nb.npy``/``y_nb_mask.npy`` are present, fixed-ID neighbour futures are also
+loaded and ``tar_real_mask`` marks every valid target agent step. Future graph
+topology is still frozen at the last observed history graph.
 """
 
 from __future__ import annotations
@@ -110,6 +109,7 @@ class NeighFormerGraphDataset(Dataset):
         self.future_len = int(fut.shape[1])
         self.has_y_vel = (self.data_dir / "y_vel.npy").exists()
         self.has_y_acc = (self.data_dir / "y_acc.npy").exists()
+        self.has_neighbor_future = (self.data_dir / "y_nb.npy").exists() and (self.data_dir / "y_nb_mask.npy").exists()
 
         if self.ego_channels != 6:
             raise ValueError(f"Expected 6 ego channels, got {self.ego_channels}")
@@ -132,6 +132,9 @@ class NeighFormerGraphDataset(Dataset):
                 arrays["y_vel"] = np.load(self.data_dir / "y_vel.npy", mmap_mode="r")
             if self.has_y_acc:
                 arrays["y_acc"] = np.load(self.data_dir / "y_acc.npy", mmap_mode="r")
+            if self.has_neighbor_future:
+                arrays["y_nb"] = np.load(self.data_dir / "y_nb.npy", mmap_mode="r")
+                arrays["y_nb_mask"] = np.load(self.data_dir / "y_nb_mask.npy", mmap_mode="r")
             self._arrays = arrays
         return self._arrays
 
@@ -179,7 +182,7 @@ class NeighFormerGraphDataset(Dataset):
         fut_ei = [hist_ei[-1]] * t_f
         fut_ef = [hist_ef[-1]] * t_f
 
-        # ---- targets (ego only)
+        # ---- targets
         y = np.zeros((n_nodes, t_f, TARGET_CHANNELS), dtype=np.float32)
         y[0, :, 0:2] = arrays["y"][i]
         if self.has_y_vel:
@@ -188,6 +191,16 @@ class NeighFormerGraphDataset(Dataset):
             y[0, :, 4:6] = arrays["y_acc"][i]
         real_mask = np.zeros((n_nodes, t_f, TARGET_CHANNELS), dtype=bool)
         real_mask[0] = True
+        if self.has_neighbor_future and "y_nb" in arrays and "y_nb_mask" in arrays:
+            y_nb = np.asarray(arrays["y_nb"][i], dtype=np.float32)
+            y_nb_mask = np.asarray(arrays["y_nb_mask"][i], dtype=bool)
+            n_target_channels = min(TARGET_CHANNELS, int(y_nb.shape[-1]))
+            for offset, slot in enumerate(slots, start=1):
+                if slot >= y_nb.shape[1]:
+                    continue
+                valid = y_nb_mask[:, slot]
+                y[offset, valid, :n_target_channels] = y_nb[valid, slot, :n_target_channels]
+                real_mask[offset, valid, :n_target_channels] = True
 
         # ---- static per-node attributes expected by upstream modules.
         # Vehicle type / length / width are not part of the NeighFormer schema,
@@ -260,6 +273,7 @@ class NeighFormerGraphDataset(Dataset):
             "neighbor_names": self.nb_feature_names,
             "y_vel_used": self.has_y_vel,
             "y_acc_used": self.has_y_acc,
+            "neighbor_future_used": self.has_neighbor_future,
         }
 
 

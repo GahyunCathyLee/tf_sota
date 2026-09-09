@@ -21,8 +21,9 @@ PyTorch Lightning, and torchmetrics versions.
   displacement, with zero at beginning-of-sequence steps.
 - `positions` stay as scene coordinates for actor/actor edges and future target
   construction.
-- Future loss is ego-only for the canonical NeighFormer arrays; neighbor future
-  steps are masked unless future arrays are added later.
+- Future loss/metrics are ego-only for canonical NeighFormer arrays. When
+  `y_nb.npy`/`y_nb_mask.npy` are present, neighbor future steps are unmasked and
+  ADE/FDE/RMSE are averaged over all valid target actors.
 - highD uses the SIMPL lane graph cache at
   `{data_root}/highD/simpl_lane_graph`; exiD falls back to a pseudo straight
   lane until an exiD map cache exists.

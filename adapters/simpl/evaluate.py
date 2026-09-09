@@ -18,7 +18,7 @@ ADAPTER_DIR = Path(__file__).resolve().parent
 EXPERIMENT_ROOT = ADAPTER_DIR.parents[1]
 sys.path.insert(0, str(EXPERIMENT_ROOT))
 
-from adapters.common import dataset_dir, split_indices_path  # noqa: E402
+from adapters.common import dataset_dir, print_hparam_summary, split_indices_path  # noqa: E402
 from adapters.mtp_go.metrics import (  # noqa: E402
     MetricAccumulator,
     SampleMetaLookup,
@@ -28,7 +28,7 @@ from adapters.mtp_go.metrics import (  # noqa: E402
     print_scenario_results,
 )
 from adapters.simpl.dataset import NeighFormerSIMPLDataset  # noqa: E402
-from adapters.simpl.train import evaluate_model, resolve_path  # noqa: E402
+from adapters.simpl.train import flatten_simpl_targets, resolve_path  # noqa: E402
 from adapters.simpl.upstream import add_upstream_to_path  # noqa: E402
 
 
@@ -60,15 +60,13 @@ def run_evaluate(model, loader, device: torch.device, hz: float, labels: SampleM
     acc = MetricAccumulator(dt=1.0 / hz, hz=hz)
     for data in loader:
         out = model(model.pre_process(data))
-        post = model.post_process(out)
-        pred_all = post["traj_pred"][:, :, :, :2]
-        prob = post["prob_pred"]
-        best = prob.argmax(dim=-1)
-        chosen = pred_all[torch.arange(pred_all.shape[0], device=device), best]
-        target = torch.stack([x[0] for x in data["TRAJS_FUT"]], dim=0).to(device)
-        sample_indices = np.asarray(data["SAMPLE_INDEX"], dtype=np.int64)
-        label_rows = labels.lookup(sample_indices) if labels is not None and labels.enabled else None
-        acc.update(chosen, target, all_modes=pred_all.transpose(1, 2), labels=label_rows)
+        chosen, target, all_modes, valid_mask, scene_rows = flatten_simpl_targets(out, data, device)
+        label_rows = None
+        if labels is not None and labels.enabled:
+            sample_indices = np.asarray(data["SAMPLE_INDEX"], dtype=np.int64)
+            scene_labels = labels.lookup(sample_indices)
+            label_rows = [scene_labels[int(i)] if scene_labels is not None else None for i in scene_rows]
+        acc.update(chosen, target, all_modes=all_modes, valid_mask=valid_mask, labels=label_rows)
     return acc
 
 
@@ -148,6 +146,32 @@ def main(argv: list[str] | None = None) -> int:
     print(f"[INFO] Lanes      : {lane_cache_root if lane_cache_root else 'pseudo fallback'}")
     gpu = f"  ({torch.cuda.get_device_name(0)})" if device.type == "cuda" else ""
     print(f"[INFO] Device     : {device}{gpu}")
+    print_hparam_summary(
+        [
+            ("adapter", "SIMPL"),
+            ("dataset", cfg.get("dataset")),
+            ("feature_mode", cfg.get("feature_mode")),
+            ("eval_scope", "ego+neighbors" if ds.has_neighbor_future else "ego_only"),
+            ("checkpoint_epoch", ckpt.get("epoch")),
+            ("epochs", cfg.get("epochs")),
+            ("batch_size", cfg.get("batch_size")),
+            ("learning_rate", cfg.get("lr")),
+            ("weight_decay", cfg.get("weight_decay")),
+            ("grad_clip_norm", cfg.get("grad_clip_norm")),
+            ("seed", cfg.get("seed")),
+            ("history_steps", model_cfg.get("g_obs_len")),
+            ("future_steps", model_cfg.get("g_pred_len")),
+            ("eval_hz", cfg.get("eval_hz", 3.0)),
+            ("actor_input_dim", model_cfg.get("in_actor")),
+            ("actor_dim", model_cfg.get("d_actor")),
+            ("lane_dim", model_cfg.get("d_lane")),
+            ("embed_dim", model_cfg.get("d_embed")),
+            ("scene_layers", model_cfg.get("n_scene_layer")),
+            ("scene_heads", model_cfg.get("n_scene_head")),
+            ("num_modes", model_cfg.get("g_num_modes")),
+            ("param_out", model_cfg.get("param_out")),
+        ]
+    )
 
     if args.measure_time:
         sample_loader = DataLoader(ds, batch_size=1, shuffle=False, num_workers=0, collate_fn=ds.collate_fn)

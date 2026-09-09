@@ -14,8 +14,8 @@ splits. Full training has not been run.
 | `train.py` | Training entry point (equivalent of `neighformer/train.py`) |
 | `evaluate.py` | Evaluation entry point (equivalent of `neighformer/evaluate.py`) |
 | `dataset.py` | NeighFormer npy → MTP-GO PyG scene graphs |
-| `metrics.py` | Metric definitions and report tables, identical to `neighformer/src/metrics.py` |
-| `lit_module.py` | Ego-only validation/test metrics on top of upstream `LitEncoderDecoder` |
+| `metrics.py` | Mask-aware ego/multi-agent metric definitions and report tables |
+| `lit_module.py` | Validation/test metrics on top of upstream `LitEncoderDecoder` |
 | `upstream.py` | Locates the upstream checkout, imports its modules, builds the motion model |
 
 No upstream model code is copied. `external/mtp_go` is a symlink to a
@@ -216,12 +216,13 @@ and non-zero fraction over the neighbour rows, which shows that `dim` (0..4) and
    future neighbour positions. The NeighFormer schema stores no neighbour
    futures, so the last observed history graph is reused for all `T_f` decoder
    steps.
-2. **Ego-only supervision and metrics.** Only node 0 has a target, so
-   `tar_real_mask` is False for every neighbour node and all reported metrics are
-   ego-only (`data.ptr[:-1]`). Upstream's `test_step` is not used: it computes a
-   miss rate with a hard-coded `i < 20` horizon check that divides by zero at
-   `T_f = 15`. `lit_module.evaluate` replaces it with exact, sample-weighted
-   aggregation.
+2. **Conditional multi-agent supervision and metrics.** Canonical NeighFormer
+   arrays only contain the ego future, so those runs remain ego-only. If
+   `y_nb.npy`/`y_nb_mask.npy` are present, neighbour futures are loaded and
+   ADE/FDE/RMSE are averaged over every valid target agent. Upstream's
+   `test_step` is not used: it computes a miss rate with a hard-coded `i < 20`
+   horizon check that divides by zero at `T_f = 15`. `lit_module.evaluate`
+   replaces it with exact, sample-weighted aggregation.
 3. **Variable node count.** Neighbour slots absent at every history step are
    dropped instead of being kept as zero-filled isolated nodes. Ego stays at
    index 0 so `data.ptr` still selects it.

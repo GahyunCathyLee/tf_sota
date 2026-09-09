@@ -571,10 +571,9 @@ def feature_mapping(feature_mode: str) -> dict[str, Any]:
         "node_feature_dim": len(nb_idx),
         "edges": "per history step, fully connected + self loops over present nodes; "
                  "edge feature = Euclidean distance in the ego-relative frame",
-        "future_edges": "last observed history graph reused for every future step "
-                        "(neighbor futures are not part of the NeighFormer schema)",
-        "targets": "ego node only: y.npy (+ y_vel.npy, y_acc.npy); "
-                   "tar_real_mask is False for every neighbor node",
+        "future_edges": "last observed history graph reused for every future step",
+        "targets": "ego target from y.npy (+ y_vel.npy, y_acc.npy); neighbor targets from "
+                   "y_nb.npy/y_nb_mask.npy when those arrays are present",
     }
 
 
@@ -665,6 +664,7 @@ def main(argv: list[str] | None = None) -> int:
         "dt_configured": dt,
         "dt_estimated": dt_est,
         "node_channel_stats": datasets["train"].channel_stats(),
+        "neighbor_future_used": bool(getattr(datasets["train"], "has_neighbor_future", False)),
     }
     if probe is not None:
         data_report["example_graph"] = {

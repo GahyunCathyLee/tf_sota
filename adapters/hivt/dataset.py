@@ -67,6 +67,7 @@ class NeighFormerHiVTDataset(Dataset):
         self.future_len = int(y.shape[1])
         self.num_steps = self.history_len + self.future_len
         self.max_neighbors = int(x_nb.shape[2])
+        self.has_neighbor_future = (self.data_dir / "y_nb.npy").exists() and (self.data_dir / "y_nb_mask.npy").exists()
         if int(x_ego.shape[2]) != 6:
             raise ValueError(f"Expected x_ego[..., 6], got {x_ego.shape}")
         if int(x_nb.shape[3]) < int(self.nb_feature_indices.max()) + 1:
@@ -87,6 +88,9 @@ class NeighFormerHiVTDataset(Dataset):
                 path = self.data_dir / f"{name}.npy"
                 if path.exists():
                     arrays[name] = np.load(path, mmap_mode="r")
+            if self.has_neighbor_future:
+                arrays["y_nb"] = np.load(self.data_dir / "y_nb.npy", mmap_mode="r")
+                arrays["y_nb_mask"] = np.load(self.data_dir / "y_nb_mask.npy", mmap_mode="r")
             self._arrays = arrays
         return self._arrays
 
@@ -137,6 +141,16 @@ class NeighFormerHiVTDataset(Dataset):
                 features[offset, :, 6:] = nb_hist[:, [8, 9]]
             features[offset, ~slot_mask] = 0.0
             padding_mask[offset, :th] = ~slot_mask
+
+        if self.has_neighbor_future and "y_nb" in arrays and "y_nb_mask" in arrays:
+            y_nb = np.asarray(arrays["y_nb"][real_idx], dtype=np.float32)
+            y_nb_mask = np.asarray(arrays["y_nb_mask"][real_idx], dtype=bool)
+            for offset, slot in enumerate(slots, start=1):
+                if slot >= y_nb.shape[1]:
+                    continue
+                valid = y_nb_mask[:, slot]
+                positions[offset, th:][valid] = y_nb[valid, slot, 0:2]
+                padding_mask[offset, th:][valid] = False
 
         bos_mask = np.zeros((num_nodes, th), dtype=bool)
         bos_mask[:, 0] = ~padding_mask[:, 0]
@@ -334,4 +348,5 @@ class NeighFormerHiVTDataset(Dataset):
             "uses_real_lane_graph": bool(
                 self.dataset_name == "highD" and self.lane_cache_root and self.lane_cache_root.exists()
             ),
+            "neighbor_future_used": self.has_neighbor_future,
         }

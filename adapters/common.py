@@ -125,3 +125,16 @@ def ego_channel_count() -> int:
 
 def neighbor_channel_count(feature_mode: str) -> int:
     return len(feature_mode_indices(feature_mode))
+
+
+def print_hparam_summary(fields: list[tuple[str, Any]]) -> None:
+    """Print a compact methods-style hyperparameter summary."""
+    print("\n====== Training Hyperparameters ======")
+    for name, value in fields:
+        if value is None:
+            continue
+        if isinstance(value, float):
+            text = f"{value:.4g}"
+        else:
+            text = str(value)
+        print(f"  {name:<20}: {text}")

@@ -17,7 +17,7 @@ ADAPTER_DIR = Path(__file__).resolve().parent
 EXPERIMENT_ROOT = ADAPTER_DIR.parents[1]
 sys.path.insert(0, str(EXPERIMENT_ROOT))
 
-from adapters.common import dataset_dir, split_indices_path  # noqa: E402
+from adapters.common import dataset_dir, print_hparam_summary, split_indices_path  # noqa: E402
 from adapters.hivt.dataset import NeighFormerHiVTDataset  # noqa: E402
 from adapters.hivt.train import format_path_template, resolve_path  # noqa: E402
 from adapters.hivt.upstream import add_upstream_to_path  # noqa: E402
@@ -61,28 +61,45 @@ def load_adapter_checkpoint(path: Path) -> dict[str, Any]:
 
 
 @torch.no_grad()
-def predict_ego(model, data) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+def predict_targets(
+    model,
+    data,
+    historical_steps: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     y_hat, pi = model(data)
-    agent_index = data["agent_index"]
-    modes = y_hat[:, agent_index, :, :2].permute(1, 0, 2, 3).contiguous()
-    probs = torch.softmax(pi[agent_index], dim=-1)
+    valid_mask_all = ~data["padding_mask"][:, historical_steps:]
+    keep = valid_mask_all.any(dim=-1)
+    modes = y_hat[:, keep, :, :2].permute(1, 0, 2, 3).contiguous()
+    probs = torch.softmax(pi[keep], dim=-1)
     best = probs.argmax(dim=-1)
     chosen = modes[torch.arange(modes.size(0), device=modes.device), best]
-    target = data.y[agent_index]
+    target = data.y[keep]
     all_modes = modes.permute(0, 2, 1, 3).contiguous()
-    return chosen, target, all_modes
+    return chosen, target, all_modes, valid_mask_all[keep], keep
 
 
 @torch.no_grad()
-def run_evaluate(model, loader, device: torch.device, cfg: dict[str, Any], labels: SampleMetaLookup | None):
+def run_evaluate(
+    model,
+    loader,
+    device: torch.device,
+    cfg: dict[str, Any],
+    labels: SampleMetaLookup | None,
+    historical_steps: int | None = None,
+):
     model.eval()
     acc = MetricAccumulator(dt=1.0 / float(cfg.get("eval_hz", 3.0)), hz=float(cfg.get("eval_hz", 3.0)))
+    historical_steps = int(historical_steps or cfg.get("historical_steps", cfg.get("history_len", 6)))
     for data in loader:
         data = data.to(device)
-        pred, target, all_modes = predict_ego(model, data)
-        sample_indices = data["sample_index"].detach().cpu().numpy().reshape(-1)
-        label_rows = labels.lookup(sample_indices) if labels is not None and labels.enabled else None
-        acc.update(pred, target, all_modes=all_modes, labels=label_rows)
+        pred, target, all_modes, valid_mask, keep = predict_targets(model, data, historical_steps)
+        label_rows = None
+        if labels is not None and labels.enabled:
+            sample_indices = data["sample_index"].detach().cpu().numpy().reshape(-1)
+            scene_labels = labels.lookup(sample_indices)
+            node_graph = data.batch[keep].detach().cpu().numpy().reshape(-1)
+            label_rows = [scene_labels[int(i)] if scene_labels is not None else None for i in node_graph]
+        acc.update(pred, target, all_modes=all_modes, valid_mask=valid_mask, labels=label_rows)
     return acc
 
 
@@ -166,13 +183,39 @@ def main(argv: list[str] | None = None) -> int:
     print(f"[INFO] Lanes      : {lane_cache_root if lane_cache_root else 'pseudo fallback'}")
     gpu = f"  ({torch.cuda.get_device_name(0)})" if device.type == "cuda" else ""
     print(f"[INFO] Device     : {device}{gpu}")
+    print_hparam_summary(
+        [
+            ("adapter", "HiVT"),
+            ("dataset", cfg.get("dataset")),
+            ("feature_mode", cfg.get("feature_mode")),
+            ("eval_scope", "ego+neighbors" if ds.has_neighbor_future else "ego_only"),
+            ("checkpoint_epoch", ckpt.get("epoch")),
+            ("epochs", cfg.get("epochs")),
+            ("batch_size", cfg.get("batch_size")),
+            ("learning_rate", model_args.get("lr")),
+            ("weight_decay", model_args.get("weight_decay")),
+            ("seed", cfg.get("seed")),
+            ("history_steps", model_args.get("historical_steps")),
+            ("future_steps", model_args.get("future_steps")),
+            ("eval_hz", cfg.get("eval_hz", 3.0)),
+            ("node_dim", model_args.get("node_dim")),
+            ("edge_dim", model_args.get("edge_dim")),
+            ("embed_dim", model_args.get("embed_dim")),
+            ("num_modes", model_args.get("num_modes")),
+            ("num_heads", model_args.get("num_heads")),
+            ("temporal_layers", model_args.get("num_temporal_layers")),
+            ("global_layers", model_args.get("num_global_layers")),
+            ("local_radius", model_args.get("local_radius")),
+            ("rotate", model_args.get("rotate")),
+        ]
+    )
 
     if args.measure_time:
         sample_loader = DataLoader(ds, batch_size=1, shuffle=False, num_workers=0)
         sample = next(iter(sample_loader)).to(device)
 
         def infer_one():
-            predict_ego(model, sample)
+            predict_targets(model, sample, historical_steps=int(model_args["historical_steps"]))
 
         lat = measure_latency(infer_one, device, args.warmup, args.iters)
         print_latency(lat, batch_size=1, warmup=args.warmup, iters=args.iters)
@@ -183,7 +226,7 @@ def main(argv: list[str] | None = None) -> int:
         labels_path = args.scenario_labels or (data_path / "scenario_labels.csv")
         labels = SampleMetaLookup(data_path, load_scenario_labels(resolve_path(labels_path)))
 
-    acc = run_evaluate(model, loader, device, cfg, labels)
+    acc = run_evaluate(model, loader, device, cfg, labels, historical_steps=int(model_args["historical_steps"]))
     results = acc.result()
     print(f"\n  n_samples = {int(results['n_samples']):,}")
     print_metrics(results)

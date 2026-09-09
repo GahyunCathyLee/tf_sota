@@ -31,7 +31,7 @@ ADAPTER_DIR = Path(__file__).resolve().parent
 EXPERIMENT_ROOT = ADAPTER_DIR.parents[1]
 sys.path.insert(0, str(EXPERIMENT_ROOT))
 
-from adapters.common import dataset_dir, feature_mode_indices, split_indices_path  # noqa: E402
+from adapters.common import dataset_dir, feature_mode_indices, print_hparam_summary, split_indices_path  # noqa: E402
 from adapters.mtp_go.dataset import NeighFormerGraphDataset  # noqa: E402
 from adapters.mtp_go.lit_module import evaluate as run_evaluate  # noqa: E402
 from adapters.mtp_go.lit_module import make_lit_module_class  # noqa: E402
@@ -237,6 +237,32 @@ def main(argv: list[str] | None = None) -> int:
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"[INFO] Model      : {hp.motion_model}/{hp.gnn_layer}  params={n_params:,}  "
           f"n_states={motion_model.n_states}  mixtures={motion_model.mixtures}")
+    print_hparam_summary(
+        [
+            ("adapter", "MTP-GO"),
+            ("dataset", dataset_name),
+            ("feature_mode", feature_mode),
+            ("eval_scope", "ego+neighbors" if ds.has_neighbor_future else "ego_only"),
+            ("checkpoint_epoch", ckpt.get("epoch")),
+            ("schedule_epochs", getattr(hp, "epochs", None)),
+            ("batch_size", getattr(hp, "batch_size", None)),
+            ("learning_rate", getattr(hp, "lr", None)),
+            ("grad_clip", getattr(hp, "clip", None)),
+            ("seed", getattr(hp, "seed", None)),
+            ("history_steps", ds.history_len),
+            ("future_steps", ds.future_len),
+            ("dt_seconds", dt),
+            ("eval_hz", hz),
+            ("node_channels", n_features),
+            ("hidden_size", getattr(hp, "hidden_size", None)),
+            ("gnn_layer", getattr(hp, "gnn_layer", None)),
+            ("gnn_layers", getattr(hp, "n_gnn_layers", None)),
+            ("attention_heads", getattr(hp, "n_heads", None)),
+            ("mixtures", motion_model.mixtures),
+            ("motion_model", getattr(hp, "motion_model", None)),
+            ("ode_solver", getattr(hp, "ode_solver", None)),
+        ]
+    )
 
     # ── Latency mode ──────────────────────────────────────────────────────────
     if args.measure_time:
@@ -246,7 +272,7 @@ def main(argv: list[str] | None = None) -> int:
         sample = Batch.from_data_list([ds[0]]).to(device)
 
         def _infer():
-            model._ego_prediction(sample)
+            model._target_predictions(sample)
 
         print("\n====== Inference Latency ======")
         lat = measure_latency(_infer, device, warmup=args.warmup, iters=args.iters)

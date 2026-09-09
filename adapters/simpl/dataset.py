@@ -84,6 +84,7 @@ class NeighFormerSIMPLDataset(Dataset):
         self.history_len = int(x_ego.shape[1])
         self.future_len = int(y.shape[1])
         self.max_neighbors = int(x_nb.shape[2])
+        self.has_neighbor_future = (self.data_dir / "y_nb.npy").exists() and (self.data_dir / "y_nb_mask.npy").exists()
         if int(x_ego.shape[2]) != 6:
             raise ValueError(f"Expected x_ego[..., 6], got {x_ego.shape}")
         if int(x_nb.shape[3]) < int(self.nb_feature_indices.max()) + 1:
@@ -120,6 +121,9 @@ class NeighFormerSIMPLDataset(Dataset):
                 p = self.data_dir / f"{name}.npy"
                 if p.exists():
                     arrays[name] = np.load(p, mmap_mode="r")
+            if self.has_neighbor_future:
+                arrays["y_nb"] = np.load(self.data_dir / "y_nb.npy", mmap_mode="r")
+                arrays["y_nb_mask"] = np.load(self.data_dir / "y_nb_mask.npy", mmap_mode="r")
             self._arrays = arrays
         return self._arrays
 
@@ -173,6 +177,15 @@ class NeighFormerSIMPLDataset(Dataset):
         trajs_fut[0] = fut
         pad_fut = np.zeros((n_agents, tf), dtype=np.float32)
         pad_fut[0] = 1.0
+        if self.has_neighbor_future and "y_nb" in arrays and "y_nb_mask" in arrays:
+            y_nb = np.asarray(arrays["y_nb"][real_idx], dtype=np.float32)
+            y_nb_mask = np.asarray(arrays["y_nb_mask"][real_idx], dtype=bool)
+            for offset, slot in enumerate(slots, start=1):
+                if slot >= y_nb.shape[1]:
+                    continue
+                valid = y_nb_mask[:, slot]
+                trajs_fut[offset, valid] = y_nb[valid, slot, 0:2]
+                pad_fut[offset, valid] = 1.0
 
         graph = self._lane_graph(real_idx, arrays)
         scene_ctrs = torch.cat([torch.from_numpy(centers), torch.from_numpy(graph["lane_ctrs"])], dim=0)
@@ -324,6 +337,7 @@ class NeighFormerSIMPLDataset(Dataset):
             "lane_max_segments": self.lane_max_segments,
             "uses_real_lane_graph": bool(self.lane_cache_root and self.lane_cache_root.exists()),
             "exid_sample_pose": bool(self._ref_heading is not None),
+            "neighbor_future_used": self.has_neighbor_future,
         }
 
     def channel_stats(self, n_samples: int = 256) -> dict[str, Any]:

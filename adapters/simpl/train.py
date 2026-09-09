@@ -222,17 +222,77 @@ def build_model_config(cfg: dict[str, Any], actor_feature_dim: int) -> dict[str,
     return model
 
 
+def flatten_simpl_targets(
+    out,
+    data: dict[str, Any],
+    device: torch.device,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, list[int]]:
+    cls_list, reg_list = out[0], out[1]
+    pred_rows = []
+    target_rows = []
+    mode_rows = []
+    mask_rows = []
+    scene_rows: list[int] = []
+    for scene_idx, (cls_scene, reg_scene, fut_scene, pad_scene) in enumerate(
+        zip(cls_list, reg_list, data["TRAJS_FUT"], data["PAD_FUT"])
+    ):
+        target = fut_scene.to(device)
+        valid_mask = pad_scene.to(device).bool()
+        keep = valid_mask.any(dim=-1)
+        if not bool(keep.any()):
+            continue
+        modes = reg_scene[keep, :, :, :2]
+        probs = cls_scene[keep]
+        best = probs.argmax(dim=-1)
+        pred_rows.append(modes[torch.arange(modes.shape[0], device=device), best])
+        target_rows.append(target[keep])
+        mode_rows.append(modes.permute(0, 2, 1, 3).contiguous())
+        mask_rows.append(valid_mask[keep])
+        scene_rows.extend([scene_idx] * int(keep.sum().item()))
+    if not pred_rows:
+        empty = torch.empty(0, 0, 2, device=device)
+        empty_modes = torch.empty(0, 0, 0, 2, device=device)
+        empty_mask = torch.empty(0, 0, dtype=torch.bool, device=device)
+        return empty, empty, empty_modes, empty_mask, []
+    return (
+        torch.cat(pred_rows, dim=0),
+        torch.cat(target_rows, dim=0),
+        torch.cat(mode_rows, dim=0),
+        torch.cat(mask_rows, dim=0),
+        scene_rows,
+    )
+
+
 def simpl_loss(out, data: dict[str, Any], device: torch.device) -> tuple[torch.Tensor, dict[str, float]]:
     cls_list, reg_list = out[0], out[1]
-    cls = torch.stack([x[0] for x in cls_list], dim=0)
-    reg = torch.stack([x[0] for x in reg_list], dim=0)
-    target = torch.stack([x[0] for x in data["TRAJS_FUT"]], dim=0).to(device)
-    has = torch.stack([x[0] for x in data["PAD_FUT"]], dim=0).bool().to(device)
-    dist = torch.norm(reg[:, :, -1] - target[:, -1].unsqueeze(1), dim=-1)
-    best = dist.argmin(dim=-1)
+    cls_rows = []
+    reg_rows = []
+    target_rows = []
+    mask_rows = []
+    for cls_scene, reg_scene, fut_scene, pad_scene in zip(cls_list, reg_list, data["TRAJS_FUT"], data["PAD_FUT"]):
+        target = fut_scene.to(device)
+        valid_mask = pad_scene.to(device).bool()
+        keep = valid_mask.any(dim=-1)
+        if not bool(keep.any()):
+            continue
+        cls_rows.append(cls_scene[keep])
+        reg_rows.append(reg_scene[keep, :, :, :2])
+        target_rows.append(target[keep])
+        mask_rows.append(valid_mask[keep])
+    if not cls_rows:
+        zero = sum(x.sum() * 0.0 for x in reg_list)
+        return zero, {"loss": 0.0, "reg_loss": 0.0, "cls_loss": 0.0}
+    cls = torch.cat(cls_rows, dim=0)
+    reg = torch.cat(reg_rows, dim=0)
+    target = torch.cat(target_rows, dim=0)
+    valid_mask = torch.cat(mask_rows, dim=0)
+    dist = torch.norm(reg - target.unsqueeze(1), dim=-1)
+    counts = valid_mask.float().sum(dim=-1).clamp_min(1.0)
+    mode_ade = (dist * valid_mask.unsqueeze(1).float()).sum(dim=-1) / counts.unsqueeze(1)
+    best = mode_ade.argmin(dim=-1)
     row = torch.arange(reg.shape[0], device=device)
     reg_best = reg[row, best]
-    reg_loss = F.smooth_l1_loss(reg_best[has], target[has], reduction="mean")
+    reg_loss = F.smooth_l1_loss(reg_best[valid_mask], target[valid_mask], reduction="mean")
     cls_loss = F.nll_loss(torch.log(cls.clamp_min(1e-8)), best)
     loss = reg_loss + 0.1 * cls_loss
     return loss, {"loss": float(loss.detach()), "reg_loss": float(reg_loss.detach()), "cls_loss": float(cls_loss.detach())}
@@ -246,13 +306,8 @@ def evaluate_model(model, loader, device: torch.device, hz: float) -> dict[str, 
     for data in loader:
         out = model(model.pre_process(data))
         loss, parts = simpl_loss(out, data, device)
-        post = model.post_process(out)
-        pred_all = post["traj_pred"][:, :, :, :2]
-        prob = post["prob_pred"]
-        best = prob.argmax(dim=-1)
-        chosen = pred_all[torch.arange(pred_all.shape[0], device=device), best]
-        target = torch.stack([x[0] for x in data["TRAJS_FUT"]], dim=0).to(device)
-        acc.update(chosen, target, all_modes=pred_all.transpose(1, 2))
+        chosen, target, all_modes, valid_mask, _ = flatten_simpl_targets(out, data, device)
+        acc.update(chosen, target, all_modes=all_modes, valid_mask=valid_mask)
         total_loss += float(loss)
         total_reg += parts["reg_loss"]
         total_cls += parts["cls_loss"]

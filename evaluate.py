@@ -26,6 +26,11 @@ def detect_adapter(ckpt_path: Path) -> str:
     adapter = cfg.get("adapter")
     if adapter:
         return str(adapter)
+    hp = ckpt.get("hyper_parameters", {}).get("args")
+    if hp is not None and getattr(hp, "feature_mode", None) is not None:
+        return "mtp_go"
+    if "/mtp_go/" in str(path).replace("\\", "/"):
+        return "mtp_go"
     if "/hivt/" in str(path).replace("\\", "/"):
         return "hivt"
     if "/par/" in str(path).replace("\\", "/"):
@@ -43,7 +48,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--ckpt", required=True, type=Path)
     known, _ = parser.parse_known_args(argv)
     adapter = str(known.model) if known.model else detect_adapter(known.ckpt)
-    if adapter == "hivt":
+    if adapter == "mtp_go":
+        from adapters.mtp_go.evaluate import main as adapter_main
+    elif adapter == "hivt":
         from adapters.hivt.evaluate import main as adapter_main
     elif adapter == "mtrpp":
         from adapters.mtrpp.evaluate import main as adapter_main
