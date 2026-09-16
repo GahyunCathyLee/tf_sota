@@ -17,12 +17,14 @@ EXPERIMENT_ROOT = ADAPTER_DIR.parents[1]
 sys.path.insert(0, str(EXPERIMENT_ROOT))
 
 from adapters.common import dataset_dir, split_indices_path  # noqa: E402
+from adapters.multiagent_common import multiagent_indices, multiagent_split_dir  # noqa: E402
 from adapters.mtrpp.dataset import (  # noqa: E402
     NeighFormerMTRDataset,
     build_intention_points_from_data,
     processed_root,
     save_processed_split,
 )
+from adapters.mtrpp.multiagent_dataset import MultiAgentMTRDataset, build_intention_points_from_multiagent  # noqa: E402
 from adapters.mtrpp.upstream import import_motion_transformer, upstream_commit, using_cuda_op_stubs  # noqa: E402
 
 try:
@@ -60,6 +62,7 @@ DEFAULTS: dict[str, Any] = {
     "max_eval_samples": None,
     "upstream_dir": "external/mtrpp",
     "global_attention_fallback": False,
+    "multiagent": False,
     "model_hparams": {},
     "smoke": {
         "epochs": 1,
@@ -116,6 +119,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--max-eval-samples", type=int)
     p.add_argument("--upstream-dir", type=Path)
     p.add_argument("--global-attention-fallback", action="store_true")
+    p.add_argument("--multiagent", action="store_true", help="Use data/{dataset}_multiagent/{split}_full arrays")
     p.add_argument("--resume", type=Path)
     p.add_argument("--check-data", action="store_true")
     return p.parse_args(argv)
@@ -248,6 +252,8 @@ def apply_cli(cfg: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]:
         cfg["reuse_processed"] = True
     if args.global_attention_fallback:
         cfg["global_attention_fallback"] = True
+    if args.multiagent:
+        cfg["multiagent"] = True
     if not cfg["dataset"] or not cfg["feature_mode"]:
         raise SystemExit("dataset and feature_mode must be set by config or CLI")
     if not cfg["exp_tag"]:
@@ -411,12 +417,26 @@ def main(argv: list[str] | None = None) -> int:
 
     data_root = resolve_path(cfg["data_root"])
     cfg["data_root"] = str(data_root)
-    data_path = dataset_dir(data_root, cfg["dataset"])
-    train_idx = subset_indices(np.load(split_indices_path(data_root, cfg["dataset"], "train")), cfg.get("max_train_samples"))
-    val_idx = subset_indices(np.load(split_indices_path(data_root, cfg["dataset"], "val")), cfg.get("max_eval_samples"))
     builder_kwargs = build_builder_kwargs(cfg)
     processed_dir = resolve_path(cfg["processed_dir"])
     out_root = processed_root(processed_dir, cfg["dataset"], cfg["feature_mode"])
+
+    if cfg.get("multiagent"):
+        train_path = multiagent_split_dir(data_root, cfg["dataset"], "train")
+        val_path = multiagent_split_dir(data_root, cfg["dataset"], "val")
+        data_path = train_path.parent
+        train_idx = multiagent_indices(train_path, cfg.get("max_train_samples"))
+        val_idx = multiagent_indices(val_path, cfg.get("max_eval_samples"))
+        if cfg["mode"] == "preprocess":
+            raise SystemExit("MTR++ --mode preprocess is only implemented for single-agent arrays.")
+        if cfg.get("reuse_processed"):
+            raise SystemExit("MTR++ --reuse-processed is only implemented for single-agent arrays.")
+    else:
+        data_path = dataset_dir(data_root, cfg["dataset"])
+        train_path = data_path
+        val_path = data_path
+        train_idx = subset_indices(np.load(split_indices_path(data_root, cfg["dataset"], "train")), cfg.get("max_train_samples"))
+        val_idx = subset_indices(np.load(split_indices_path(data_root, cfg["dataset"], "val")), cfg.get("max_eval_samples"))
 
     if cfg["mode"] == "preprocess":
         builder = NeighFormerMTRDataset(data_path, train_idx[:1], cfg["dataset"], cfg["feature_mode"], "train", builder_kwargs).builder
@@ -445,26 +465,30 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(report, indent=2))
         return 0
 
-    train_ds = NeighFormerMTRDataset(
-        data_path,
-        train_idx,
-        cfg["dataset"],
-        cfg["feature_mode"],
-        "train",
-        builder_kwargs,
-        processed_dir=processed_dir,
-        reuse_processed=bool(cfg["reuse_processed"]),
-    )
-    val_ds = NeighFormerMTRDataset(
-        data_path,
-        val_idx,
-        cfg["dataset"],
-        cfg["feature_mode"],
-        "val",
-        builder_kwargs,
-        processed_dir=processed_dir,
-        reuse_processed=bool(cfg["reuse_processed"]),
-    )
+    if cfg.get("multiagent"):
+        train_ds = MultiAgentMTRDataset(train_path, cfg["dataset"], "train", indices=train_idx, **builder_kwargs)
+        val_ds = MultiAgentMTRDataset(val_path, cfg["dataset"], "val", indices=val_idx, **builder_kwargs)
+    else:
+        train_ds = NeighFormerMTRDataset(
+            data_path,
+            train_idx,
+            cfg["dataset"],
+            cfg["feature_mode"],
+            "train",
+            builder_kwargs,
+            processed_dir=processed_dir,
+            reuse_processed=bool(cfg["reuse_processed"]),
+        )
+        val_ds = NeighFormerMTRDataset(
+            data_path,
+            val_idx,
+            cfg["dataset"],
+            cfg["feature_mode"],
+            "val",
+            builder_kwargs,
+            processed_dir=processed_dir,
+            reuse_processed=bool(cfg["reuse_processed"]),
+        )
 
     output_dir = format_path_template(cfg["output_dir"], cfg)
     ckpt_dir = format_path_template(cfg["ckpt_dir"], cfg) / cfg["exp_tag"]
@@ -500,12 +524,19 @@ def main(argv: list[str] | None = None) -> int:
             flush=True,
         )
     intention_file = out_root / "intention_points.pkl"
-    build_intention_points_from_data(
-        data_path,
-        np.load(split_indices_path(data_root, cfg["dataset"], "train")),
-        intention_file,
-        num_modes=int((cfg.get("model_hparams") or {}).get("num_motion_modes", 6)),
-    )
+    if cfg.get("multiagent"):
+        build_intention_points_from_multiagent(
+            train_path,
+            intention_file,
+            num_modes=int((cfg.get("model_hparams") or {}).get("num_motion_modes", 6)),
+        )
+    else:
+        build_intention_points_from_data(
+            data_path,
+            np.load(split_indices_path(data_root, cfg["dataset"], "train")),
+            intention_file,
+            num_modes=int((cfg.get("model_hparams") or {}).get("num_motion_modes", 6)),
+        )
     model_cfg = build_model_config(cfg, train_ds, intention_file)
     mtr_global_cfg.ROOT_DIR = EXPERIMENT_ROOT
     model = MotionTransformer(config=model_cfg).to(device)
@@ -525,6 +556,7 @@ def main(argv: list[str] | None = None) -> int:
     print("====== MTR++ Train ======", flush=True)
     print(f"upstream : {upstream_dir} ({upstream_commit(upstream_dir)})", flush=True)
     print(f"data     : {data_path}", flush=True)
+    print(f"source   : {'multiagent' if cfg.get('multiagent') else 'single-agent dimI'}", flush=True)
     print(f"samples  : train={len(train_ds):,} val={len(val_ds):,}", flush=True)
     print(f"mode     : {cfg['mode']}  epochs={cfg['epochs']}  batch_size={cfg['batch_size']}", flush=True)
     print(

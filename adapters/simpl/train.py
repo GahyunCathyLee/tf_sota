@@ -23,8 +23,10 @@ EXPERIMENT_ROOT = ADAPTER_DIR.parents[1]
 sys.path.insert(0, str(EXPERIMENT_ROOT))
 
 from adapters.common import dataset_dir, split_indices_path  # noqa: E402
+from adapters.multiagent_common import multiagent_indices, multiagent_split_dir  # noqa: E402
 from adapters.mtp_go.metrics import MetricAccumulator, print_metrics  # noqa: E402
 from adapters.simpl.dataset import NeighFormerSIMPLDataset, SIMPL_FEATURE_MODES  # noqa: E402
+from adapters.simpl.multiagent_dataset import MultiAgentSIMPLDataset  # noqa: E402
 from adapters.simpl.upstream import add_upstream_to_path, upstream_commit  # noqa: E402
 
 
@@ -57,6 +59,7 @@ DEFAULTS: dict[str, Any] = {
     "max_train_samples": None,
     "max_eval_samples": None,
     "upstream_dir": "external/simpl",
+    "multiagent": False,
 }
 
 
@@ -84,6 +87,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--lane-max-segments", type=int)
     p.add_argument("--log-interval", type=int)
     p.add_argument("--upstream-dir", type=Path)
+    p.add_argument("--multiagent", action="store_true", help="Use data/{dataset}_multiagent/{split}_full arrays")
     p.add_argument("--check-data", action="store_true")
     return p.parse_args(argv)
 
@@ -159,6 +163,8 @@ def apply_cli(cfg: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]:
         value = getattr(args, cli_name)
         if value is not None:
             cfg[cfg_name] = value
+    if args.multiagent:
+        cfg["multiagent"] = True
     if not cfg["dataset"] or not cfg["feature_mode"]:
         raise SystemExit("dataset and feature_mode must be set by config or CLI")
     if cfg["feature_mode"] not in SIMPL_FEATURE_MODES:
@@ -347,30 +353,50 @@ def main(argv: list[str] | None = None) -> int:
             "This run will use pseudo-lane fallback unless a matching cache is made available.",
             flush=True,
         )
-    train_idx = subset_indices(np.load(split_indices_path(data_root, cfg["dataset"], "train")), cfg.get("max_train_samples"))
-    val_idx = subset_indices(np.load(split_indices_path(data_root, cfg["dataset"], "val")), cfg.get("max_eval_samples"))
-    train_ds = NeighFormerSIMPLDataset(
-        data_path,
-        train_idx,
-        cfg["dataset"],
-        cfg["feature_mode"],
-        "train",
-        cfg["lane_half_length"],
-        lane_cache_root=lane_cache_root,
-        lane_radius=cfg["lane_radius"],
-        lane_max_segments=cfg["lane_max_segments"],
-    )
-    val_ds = NeighFormerSIMPLDataset(
-        data_path,
-        val_idx,
-        cfg["dataset"],
-        cfg["feature_mode"],
-        "val",
-        cfg["lane_half_length"],
-        lane_cache_root=lane_cache_root,
-        lane_radius=cfg["lane_radius"],
-        lane_max_segments=cfg["lane_max_segments"],
-    )
+    if cfg.get("multiagent"):
+        train_path = multiagent_split_dir(data_root, cfg["dataset"], "train")
+        val_path = multiagent_split_dir(data_root, cfg["dataset"], "val")
+        train_ds = MultiAgentSIMPLDataset(
+            train_path,
+            cfg["dataset"],
+            "train",
+            indices=multiagent_indices(train_path, cfg.get("max_train_samples")),
+            lane_half_length=cfg["lane_half_length"],
+        )
+        val_ds = MultiAgentSIMPLDataset(
+            val_path,
+            cfg["dataset"],
+            "val",
+            indices=multiagent_indices(val_path, cfg.get("max_eval_samples")),
+            lane_half_length=cfg["lane_half_length"],
+        )
+        data_path = train_path.parent
+        lane_cache_exists = False
+    else:
+        train_idx = subset_indices(np.load(split_indices_path(data_root, cfg["dataset"], "train")), cfg.get("max_train_samples"))
+        val_idx = subset_indices(np.load(split_indices_path(data_root, cfg["dataset"], "val")), cfg.get("max_eval_samples"))
+        train_ds = NeighFormerSIMPLDataset(
+            data_path,
+            train_idx,
+            cfg["dataset"],
+            cfg["feature_mode"],
+            "train",
+            cfg["lane_half_length"],
+            lane_cache_root=lane_cache_root,
+            lane_radius=cfg["lane_radius"],
+            lane_max_segments=cfg["lane_max_segments"],
+        )
+        val_ds = NeighFormerSIMPLDataset(
+            data_path,
+            val_idx,
+            cfg["dataset"],
+            cfg["feature_mode"],
+            "val",
+            cfg["lane_half_length"],
+            lane_cache_root=lane_cache_root,
+            lane_radius=cfg["lane_radius"],
+            lane_max_segments=cfg["lane_max_segments"],
+        )
 
     output_dir = format_path_template(cfg["output_dir"], cfg)
     ckpt_dir = format_path_template(cfg["ckpt_dir"], cfg) / cfg["exp_tag"]
@@ -402,6 +428,7 @@ def main(argv: list[str] | None = None) -> int:
     print("====== SIMPL Train ======")
     print(f"upstream : {upstream_dir} ({upstream_commit(upstream_dir)})")
     print(f"data     : {data_path}")
+    print(f"source   : {'multiagent' if cfg.get('multiagent') else 'single-agent dimI'}")
     print(f"feature  : {cfg['feature_mode']}  actor_features={train_ds.actor_feature_names}")
     print(f"lanes    : {lane_cache_root if lane_cache_root else 'pseudo fallback'}")
     print(f"lane ok  : exists={lane_cache_exists}  source={'cached lanes' if lane_cache_exists else 'pseudo fallback'}")

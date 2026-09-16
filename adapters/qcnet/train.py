@@ -20,7 +20,9 @@ EXPERIMENT_ROOT = ADAPTER_DIR.parents[1]
 sys.path.insert(0, str(EXPERIMENT_ROOT))
 
 from adapters.common import dataset_dir, split_indices_path  # noqa: E402
+from adapters.multiagent_common import multiagent_indices, multiagent_split_dir  # noqa: E402
 from adapters.qcnet.dataset import NeighFormerQCNetDataset  # noqa: E402
+from adapters.qcnet.multiagent_dataset import MultiAgentQCNetDataset  # noqa: E402
 from adapters.qcnet.upstream import add_upstream_to_path, upstream_commit  # noqa: E402
 
 
@@ -48,6 +50,7 @@ DEFAULTS: dict[str, Any] = {
     "max_train_samples": None,
     "max_eval_samples": None,
     "upstream_dir": "external/qcnet",
+    "multiagent": False,
 }
 
 
@@ -73,6 +76,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--lane-radius", type=float)
     p.add_argument("--lane-max-segments", type=int)
     p.add_argument("--upstream-dir", type=Path)
+    p.add_argument("--multiagent", action="store_true", help="Use data/{dataset}_multiagent/{split}_full arrays")
     p.add_argument("--check-data", action="store_true")
     return p.parse_args(argv)
 
@@ -161,6 +165,8 @@ def apply_cli(cfg: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]:
         value = getattr(args, cli_name)
         if value is not None:
             cfg[cfg_name] = value
+    if args.multiagent:
+        cfg["multiagent"] = True
     if not cfg["dataset"] or not cfg["feature_mode"]:
         raise SystemExit("dataset and feature_mode must be set by config or CLI")
     if not cfg["exp_tag"]:
@@ -261,35 +267,50 @@ def main(argv: list[str] | None = None) -> int:
     set_seed(int(cfg["seed"]))
 
     data_root = resolve_path(cfg["data_root"])
-    data_path = dataset_dir(data_root, cfg["dataset"])
-    train_idx = np.load(split_indices_path(data_root, cfg["dataset"], "train"))
-    val_idx = np.load(split_indices_path(data_root, cfg["dataset"], "val"))
-    train_idx = subset_indices(train_idx, cfg.get("max_train_samples"))
-    val_idx = subset_indices(val_idx, cfg.get("max_eval_samples"))
     lane_cache_root = format_path_template(cfg["lane_cache_root"], cfg) if cfg.get("lane_cache_root") else None
 
-    train_ds = NeighFormerQCNetDataset(
-        data_path,
-        train_idx,
-        cfg["dataset"],
-        cfg["feature_mode"],
-        "train",
-        cfg["lane_half_length"],
-        lane_cache_root=lane_cache_root,
-        lane_radius=cfg["lane_radius"],
-        lane_max_segments=cfg["lane_max_segments"],
-    )
-    val_ds = NeighFormerQCNetDataset(
-        data_path,
-        val_idx,
-        cfg["dataset"],
-        cfg["feature_mode"],
-        "val",
-        cfg["lane_half_length"],
-        lane_cache_root=lane_cache_root,
-        lane_radius=cfg["lane_radius"],
-        lane_max_segments=cfg["lane_max_segments"],
-    )
+    if cfg.get("multiagent"):
+        train_path = multiagent_split_dir(data_root, cfg["dataset"], "train")
+        val_path = multiagent_split_dir(data_root, cfg["dataset"], "val")
+        train_ds = MultiAgentQCNetDataset(
+            train_path,
+            cfg["dataset"],
+            "train",
+            indices=multiagent_indices(train_path, cfg.get("max_train_samples")),
+        )
+        val_ds = MultiAgentQCNetDataset(
+            val_path,
+            cfg["dataset"],
+            "val",
+            indices=multiagent_indices(val_path, cfg.get("max_eval_samples")),
+        )
+        data_path = train_path.parent
+    else:
+        data_path = dataset_dir(data_root, cfg["dataset"])
+        train_idx = subset_indices(np.load(split_indices_path(data_root, cfg["dataset"], "train")), cfg.get("max_train_samples"))
+        val_idx = subset_indices(np.load(split_indices_path(data_root, cfg["dataset"], "val")), cfg.get("max_eval_samples"))
+        train_ds = NeighFormerQCNetDataset(
+            data_path,
+            train_idx,
+            cfg["dataset"],
+            cfg["feature_mode"],
+            "train",
+            cfg["lane_half_length"],
+            lane_cache_root=lane_cache_root,
+            lane_radius=cfg["lane_radius"],
+            lane_max_segments=cfg["lane_max_segments"],
+        )
+        val_ds = NeighFormerQCNetDataset(
+            data_path,
+            val_idx,
+            cfg["dataset"],
+            cfg["feature_mode"],
+            "val",
+            cfg["lane_half_length"],
+            lane_cache_root=lane_cache_root,
+            lane_radius=cfg["lane_radius"],
+            lane_max_segments=cfg["lane_max_segments"],
+        )
 
     output_dir = format_path_template(cfg["output_dir"], cfg)
     ckpt_dir = format_path_template(cfg["ckpt_dir"], cfg) / cfg["exp_tag"]
@@ -352,6 +373,7 @@ def main(argv: list[str] | None = None) -> int:
     print("====== QCNet Train ======")
     print(f"upstream : {upstream_dir} ({upstream_commit(upstream_dir)})")
     print(f"data     : {data_path}")
+    print(f"source   : {'multiagent' if cfg.get('multiagent') else 'single-agent dimI'}")
     print(f"lanes    : {lane_cache_root if lane_cache_root else 'pseudo fallback'}")
     print(f"samples  : train={len(train_ds):,} val={len(val_ds):,}")
     print(f"ckpt     : {ckpt_dir}")

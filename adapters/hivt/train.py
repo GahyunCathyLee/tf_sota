@@ -20,7 +20,9 @@ EXPERIMENT_ROOT = ADAPTER_DIR.parents[1]
 sys.path.insert(0, str(EXPERIMENT_ROOT))
 
 from adapters.common import dataset_dir, split_indices_path  # noqa: E402
+from adapters.multiagent_common import multiagent_indices, multiagent_split_dir  # noqa: E402
 from adapters.hivt.dataset import NeighFormerHiVTDataset  # noqa: E402
+from adapters.hivt.multiagent_dataset import MultiAgentHiVTDataset  # noqa: E402
 from adapters.hivt.upstream import add_upstream_to_path, upstream_commit  # noqa: E402
 
 
@@ -52,6 +54,7 @@ DEFAULTS: dict[str, Any] = {
     "max_train_samples": None,
     "max_eval_samples": None,
     "upstream_dir": "external/hivt",
+    "multiagent": False,
     "model_hparams": {},
     "smoke": {
         "epochs": 2,
@@ -94,6 +97,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--lane-radius", type=float)
     p.add_argument("--lane-max-segments", type=int)
     p.add_argument("--upstream-dir", type=Path)
+    p.add_argument("--multiagent", action="store_true", help="Use data/{dataset}_multiagent/{split}_full arrays")
     p.add_argument("--check-data", action="store_true")
     return p.parse_args(argv)
 
@@ -179,6 +183,8 @@ def apply_cli(cfg: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]:
         value = getattr(args, cli_name)
         if value is not None:
             cfg[cfg_name] = value
+    if args.multiagent:
+        cfg["multiagent"] = True
     if args.progress_bar:
         cfg["progress_bar"] = True
     if not cfg["dataset"] or not cfg["feature_mode"]:
@@ -277,32 +283,49 @@ def main(argv: list[str] | None = None) -> int:
     data_root = resolve_path(cfg["data_root"])
     cfg["data_root"] = str(data_root)
     data_path = dataset_dir(data_root, cfg["dataset"])
-    train_idx = subset_indices(np.load(split_indices_path(data_root, cfg["dataset"], "train")), cfg.get("max_train_samples"))
-    val_idx = subset_indices(np.load(split_indices_path(data_root, cfg["dataset"], "val")), cfg.get("max_eval_samples"))
     lane_cache_root = format_path_template(cfg["lane_cache_root"], cfg) if cfg.get("lane_cache_root") else None
 
-    train_ds = NeighFormerHiVTDataset(
-        data_path,
-        train_idx,
-        cfg["dataset"],
-        cfg["feature_mode"],
-        "train",
-        cfg["lane_half_length"],
-        lane_cache_root=lane_cache_root,
-        lane_radius=cfg["lane_radius"],
-        lane_max_segments=cfg["lane_max_segments"],
-    )
-    val_ds = NeighFormerHiVTDataset(
-        data_path,
-        val_idx,
-        cfg["dataset"],
-        cfg["feature_mode"],
-        "val",
-        cfg["lane_half_length"],
-        lane_cache_root=lane_cache_root,
-        lane_radius=cfg["lane_radius"],
-        lane_max_segments=cfg["lane_max_segments"],
-    )
+    if cfg.get("multiagent"):
+        train_path = multiagent_split_dir(data_root, cfg["dataset"], "train")
+        val_path = multiagent_split_dir(data_root, cfg["dataset"], "val")
+        train_ds = MultiAgentHiVTDataset(
+            train_path,
+            cfg["dataset"],
+            "train",
+            indices=multiagent_indices(train_path, cfg.get("max_train_samples")),
+        )
+        val_ds = MultiAgentHiVTDataset(
+            val_path,
+            cfg["dataset"],
+            "val",
+            indices=multiagent_indices(val_path, cfg.get("max_eval_samples")),
+        )
+        data_path = train_path.parent
+    else:
+        train_idx = subset_indices(np.load(split_indices_path(data_root, cfg["dataset"], "train")), cfg.get("max_train_samples"))
+        val_idx = subset_indices(np.load(split_indices_path(data_root, cfg["dataset"], "val")), cfg.get("max_eval_samples"))
+        train_ds = NeighFormerHiVTDataset(
+            data_path,
+            train_idx,
+            cfg["dataset"],
+            cfg["feature_mode"],
+            "train",
+            cfg["lane_half_length"],
+            lane_cache_root=lane_cache_root,
+            lane_radius=cfg["lane_radius"],
+            lane_max_segments=cfg["lane_max_segments"],
+        )
+        val_ds = NeighFormerHiVTDataset(
+            data_path,
+            val_idx,
+            cfg["dataset"],
+            cfg["feature_mode"],
+            "val",
+            cfg["lane_half_length"],
+            lane_cache_root=lane_cache_root,
+            lane_radius=cfg["lane_radius"],
+            lane_max_segments=cfg["lane_max_segments"],
+        )
 
     output_dir = format_path_template(cfg["output_dir"], cfg)
     ckpt_dir = format_path_template(cfg["ckpt_dir"], cfg) / cfg["exp_tag"]
@@ -357,6 +380,7 @@ def main(argv: list[str] | None = None) -> int:
     print("====== HiVT Train ======", flush=True)
     print(f"upstream : {upstream_dir} ({upstream_commit(upstream_dir)})", flush=True)
     print(f"data     : {data_path}", flush=True)
+    print(f"source   : {'multiagent' if cfg.get('multiagent') else 'single-agent dimI'}", flush=True)
     print(f"lanes    : {lane_cache_root if lane_cache_root else 'pseudo fallback'}", flush=True)
     print(f"samples  : train={len(train_ds):,} val={len(val_ds):,}", flush=True)
     print(f"mode     : {cfg['mode']}  epochs={cfg['epochs']}  batch_size={cfg['batch_size']}", flush=True)
