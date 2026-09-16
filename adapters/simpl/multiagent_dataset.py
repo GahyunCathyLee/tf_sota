@@ -71,8 +71,8 @@ class MultiAgentSIMPLDataset(Dataset):
                 trajs_fut[i, valid] = NeighFormerSIMPLDataset._to_actor_local(y[src, valid, 0:2], centers[i], vecs[i])
 
         lane_graph = self._pseudo_lane_graph()
-        scene_ctrs = torch.from_numpy(centers)
-        scene_vecs = torch.from_numpy(vecs)
+        scene_ctrs = torch.cat([torch.from_numpy(centers), torch.from_numpy(lane_graph["lane_ctrs"])], dim=0)
+        scene_vecs = torch.cat([torch.from_numpy(vecs), torch.from_numpy(lane_graph["lane_vecs"])], dim=0)
         rpe = build_rpe(scene_ctrs, scene_vecs)
         meta = meta_dict(arrays, scene_idx)
         return {
