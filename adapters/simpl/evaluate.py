@@ -28,7 +28,7 @@ from adapters.mtp_go.metrics import (  # noqa: E402
     print_scenario_results,
 )
 from adapters.simpl.dataset import NeighFormerSIMPLDataset  # noqa: E402
-from adapters.simpl.train import flatten_simpl_targets, resolve_path  # noqa: E402
+from adapters.simpl.train import flatten_simpl_targets, resolve_path, trainable_parameter_count  # noqa: E402
 from adapters.simpl.upstream import add_upstream_to_path  # noqa: E402
 
 
@@ -117,6 +117,7 @@ def main(argv: list[str] | None = None) -> int:
     data_path = dataset_dir(data_root, cfg["dataset"])
     lane_cache_value = args.lane_cache_root or cfg.get("lane_cache_root")
     lane_cache_root = resolve_path(str(lane_cache_value).format(**cfg)) if lane_cache_value else None
+    lane_cache_exists = bool(lane_cache_root and lane_cache_root.exists())
     indices = np.load(split_indices_path(data_root, cfg["dataset"], args.split))
     if args.max_samples is not None:
         indices = indices[: args.max_samples]
@@ -144,8 +145,10 @@ def main(argv: list[str] | None = None) -> int:
     print(f"[INFO] Upstream   : {upstream_dir}")
     print(f"[INFO] Dataset    : {args.split} split  n={len(ds):,}  {cfg['dataset']} {cfg['feature_mode']}")
     print(f"[INFO] Lanes      : {lane_cache_root if lane_cache_root else 'pseudo fallback'}")
+    print(f"[INFO] Lane cache : exists={lane_cache_exists}  source={'cached lanes' if lane_cache_exists else 'pseudo fallback'}")
     gpu = f"  ({torch.cuda.get_device_name(0)})" if device.type == "cuda" else ""
     print(f"[INFO] Device     : {device}{gpu}")
+    print(f"[INFO] Metrics    : most-likely mode by class argmax; minADE/minFDE also reported over all modes")
     print_hparam_summary(
         [
             ("adapter", "SIMPL"),
@@ -163,6 +166,7 @@ def main(argv: list[str] | None = None) -> int:
             ("future_steps", model_cfg.get("g_pred_len")),
             ("eval_hz", cfg.get("eval_hz", 3.0)),
             ("actor_input_dim", model_cfg.get("in_actor")),
+            ("actor_features", getattr(ds, "actor_feature_names", None)),
             ("actor_dim", model_cfg.get("d_actor")),
             ("lane_dim", model_cfg.get("d_lane")),
             ("embed_dim", model_cfg.get("d_embed")),
@@ -170,6 +174,7 @@ def main(argv: list[str] | None = None) -> int:
             ("scene_heads", model_cfg.get("n_scene_head")),
             ("num_modes", model_cfg.get("g_num_modes")),
             ("param_out", model_cfg.get("param_out")),
+            ("trainable_params", trainable_parameter_count(model)),
         ]
     )
 

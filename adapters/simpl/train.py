@@ -24,7 +24,7 @@ sys.path.insert(0, str(EXPERIMENT_ROOT))
 
 from adapters.common import dataset_dir, split_indices_path  # noqa: E402
 from adapters.mtp_go.metrics import MetricAccumulator, print_metrics  # noqa: E402
-from adapters.simpl.dataset import NeighFormerSIMPLDataset  # noqa: E402
+from adapters.simpl.dataset import NeighFormerSIMPLDataset, SIMPL_FEATURE_MODES  # noqa: E402
 from adapters.simpl.upstream import add_upstream_to_path, upstream_commit  # noqa: E402
 
 
@@ -64,7 +64,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--config", required=True, type=Path)
     p.add_argument("--dataset", choices=["highD", "exiD"])
-    p.add_argument("--feature-mode", choices=["baseline", "dimI"])
+    p.add_argument("--feature-mode", choices=sorted(SIMPL_FEATURE_MODES))
     p.add_argument("--data-root", type=Path)
     p.add_argument("--ckpt-dir", type=Path)
     p.add_argument("--output-dir", type=Path)
@@ -161,8 +161,11 @@ def apply_cli(cfg: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]:
             cfg[cfg_name] = value
     if not cfg["dataset"] or not cfg["feature_mode"]:
         raise SystemExit("dataset and feature_mode must be set by config or CLI")
+    if cfg["feature_mode"] not in SIMPL_FEATURE_MODES:
+        valid = ", ".join(sorted(SIMPL_FEATURE_MODES))
+        raise SystemExit(f"Unsupported SIMPL feature_mode '{cfg['feature_mode']}'. Expected one of: {valid}")
     if not cfg["exp_tag"]:
-        cfg["exp_tag"] = f"{cfg['dataset']}{1 if cfg['feature_mode'] == 'dimI' else 0}"
+        cfg["exp_tag"] = f"{cfg['dataset']}_{cfg['feature_mode']}_seed{cfg['seed']}"
     return cfg
 
 
@@ -220,6 +223,10 @@ def build_model_config(cfg: dict[str, Any], actor_feature_dim: int) -> dict[str,
     model["g_obs_len"] = 6
     model["g_pred_len"] = 15
     return model
+
+
+def trainable_parameter_count(model: torch.nn.Module) -> int:
+    return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
 
 def flatten_simpl_targets(
@@ -333,6 +340,13 @@ def main(argv: list[str] | None = None) -> int:
     data_root = resolve_path(cfg["data_root"])
     data_path = dataset_dir(data_root, cfg["dataset"])
     lane_cache_root = format_path_template(cfg["lane_cache_root"], cfg) if cfg.get("lane_cache_root") else None
+    lane_cache_exists = bool(lane_cache_root and lane_cache_root.exists())
+    if lane_cache_root and not lane_cache_exists:
+        print(
+            f"[WARN] SIMPL lane cache path does not exist: {lane_cache_root}. "
+            "This run will use pseudo-lane fallback unless a matching cache is made available.",
+            flush=True,
+        )
     train_idx = subset_indices(np.load(split_indices_path(data_root, cfg["dataset"], "train")), cfg.get("max_train_samples"))
     val_idx = subset_indices(np.load(split_indices_path(data_root, cfg["dataset"], "val")), cfg.get("max_eval_samples"))
     train_ds = NeighFormerSIMPLDataset(
@@ -382,16 +396,20 @@ def main(argv: list[str] | None = None) -> int:
     val_loader = DataLoader(val_ds, shuffle=False, drop_last=False, **loader_kwargs)
     model_cfg = build_model_config(cfg, train_ds.actor_feature_dim)
     model = Simpl(model_cfg, device).to(device)
+    n_params = trainable_parameter_count(model)
     optimizer = torch.optim.Adam(model.parameters(), lr=float(cfg["lr"]), weight_decay=float(cfg["weight_decay"]))
 
     print("====== SIMPL Train ======")
     print(f"upstream : {upstream_dir} ({upstream_commit(upstream_dir)})")
     print(f"data     : {data_path}")
+    print(f"feature  : {cfg['feature_mode']}  actor_features={train_ds.actor_feature_names}")
     print(f"lanes    : {lane_cache_root if lane_cache_root else 'pseudo fallback'}")
+    print(f"lane ok  : exists={lane_cache_exists}  source={'cached lanes' if lane_cache_exists else 'pseudo fallback'}")
     print(f"samples  : train={len(train_ds):,} val={len(val_ds):,}")
     print(f"batch    : micro={train_batch_size} effective={effective_batch_size} accum={accum_steps}")
     print(f"device   : {device}")
     print(f"ckpt     : {ckpt_dir}")
+    print(f"params   : trainable={n_params:,}  in_actor={model_cfg['in_actor']}")
 
     best_score = float("inf")
     for epoch in range(1, int(cfg["epochs"]) + 1):

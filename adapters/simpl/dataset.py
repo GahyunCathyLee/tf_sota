@@ -1,4 +1,14 @@
-"""NeighFormer npy -> SIMPL batch conversion."""
+"""NeighFormer npy -> SIMPL batch conversion.
+
+The actor tensor intentionally mirrors upstream SIMPL AV1:
+
+    [step_dx, step_dy, valid_flag]
+
+where step displacement is computed from actor-local observed positions and
+``valid_flag`` is 1 for observed history timesteps and 0 for padded timesteps.
+SIMPL-specific feature modes append only diagnostic side channels after those
+three upstream channels.
+"""
 
 from __future__ import annotations
 
@@ -10,7 +20,6 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 
-from adapters.common import feature_mode_indices, feature_mode_names
 from adapters.simpl.lane_graph import (
     empty_graph,
     graph_from_segments,
@@ -18,6 +27,29 @@ from adapters.simpl.lane_graph import (
     rotate_to_heading,
     translate_to_origin,
 )
+
+RAW_NB_FEATURES = {
+    "dx": 0,
+    "dy": 1,
+    "dvx": 2,
+    "dvy": 3,
+    "dax": 4,
+    "day": 5,
+    "s_x": 6,
+    "s_y": 7,
+    "dim": 8,
+    "I": 9,
+}
+
+BASE_ACTOR_FEATURE_NAMES = ["step_dx", "step_dy", "valid"]
+SIMPL_FEATURE_MODES = {
+    "baseline": [],
+    "baseline_zero2": ["zero0", "zero1"],
+    "dim_only": ["dim"],
+    "I_only": ["I"],
+    "shuffled_I": ["I_shuffled"],
+    "dimI": ["dim", "I"],
+}
 
 
 def _get_cos(v1: torch.Tensor, v2: torch.Tensor) -> torch.Tensor:
@@ -68,9 +100,13 @@ class NeighFormerSIMPLDataset(Dataset):
         self.lane_cache_root = Path(lane_cache_root) if lane_cache_root else None
         self.lane_radius = float(lane_radius)
         self.lane_max_segments = int(lane_max_segments)
-        self.nb_feature_indices = np.asarray(feature_mode_indices(feature_mode), dtype=np.int64)
-        self.nb_feature_names = feature_mode_names(feature_mode)
-        self.actor_feature_dim = len(self.nb_feature_indices)
+        if feature_mode not in SIMPL_FEATURE_MODES:
+            valid = ", ".join(SIMPL_FEATURE_MODES)
+            raise ValueError(f"Unsupported SIMPL feature_mode '{feature_mode}'. Expected one of: {valid}")
+        self.extra_feature_names = list(SIMPL_FEATURE_MODES[feature_mode])
+        self.actor_feature_names = BASE_ACTOR_FEATURE_NAMES + self.extra_feature_names
+        self.actor_feature_dim = len(self.actor_feature_names)
+        self.side_feature_dim = len(self.extra_feature_names)
         self._arrays: dict[str, np.ndarray] | None = None
         self._recording_cache: dict[int, dict[str, Any] | None] = {}
         self._warned_lane_cache = False
@@ -87,12 +123,90 @@ class NeighFormerSIMPLDataset(Dataset):
         self.has_neighbor_future = (self.data_dir / "y_nb.npy").exists() and (self.data_dir / "y_nb_mask.npy").exists()
         if int(x_ego.shape[2]) != 6:
             raise ValueError(f"Expected x_ego[..., 6], got {x_ego.shape}")
-        if int(x_nb.shape[3]) < int(self.nb_feature_indices.max()) + 1:
+        needed_raw = [RAW_NB_FEATURES[name] for name in ("dim", "I") if name in {"dim", "I"}]
+        if int(x_nb.shape[3]) < max(needed_raw) + 1:
             raise ValueError(
-                f"x_nb has {x_nb.shape[3]} channels; {feature_mode} needs "
-                f"index {int(self.nb_feature_indices.max())}"
+                f"x_nb has {x_nb.shape[3]} channels; SIMPL dim/I controls need "
+                f"indices dim={RAW_NB_FEATURES['dim']} and I={RAW_NB_FEATURES['I']}"
             )
         self._load_sample_pose_cache()
+
+    @staticmethod
+    def _to_actor_local(points: np.ndarray, ctr: np.ndarray, vec: np.ndarray) -> np.ndarray:
+        c, s = float(vec[0]), float(vec[1])
+        rot = np.array([[c, -s], [s, c]], dtype=np.float32)
+        return (np.asarray(points, dtype=np.float32) - ctr).dot(rot).astype(np.float32)
+
+    @classmethod
+    def _actor_local_positions(cls, scene_pos: np.ndarray, valid: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Return upstream-style actor-local positions plus scene center/vector.
+
+        Upstream SIMPL pads missing actor positions by nearest-neighbor filling,
+        then appends the original valid flag as a separate channel. Actors are
+        centered at their last observation and rotated by their history vector.
+        """
+        valid = np.asarray(valid, dtype=bool)
+        if not valid.any():
+            filled = np.zeros_like(scene_pos, dtype=np.float32)
+        else:
+            filled = np.asarray(scene_pos, dtype=np.float32).copy()
+            valid_idx = np.flatnonzero(valid)
+            for t in range(filled.shape[0]):
+                if valid[t]:
+                    continue
+                nearest = valid_idx[np.argmin(np.abs(valid_idx - t))]
+                filled[t] = filled[nearest]
+        ctr = filled[-1].astype(np.float32)
+        vec_raw = filled[-1] - filled[0]
+        norm = float(np.linalg.norm(vec_raw))
+        if norm < 1e-6:
+            vec_raw = np.array([1.0, 0.0], dtype=np.float32)
+        theta = float(np.arctan2(vec_raw[1], vec_raw[0]))
+        vec = np.array([np.cos(theta), np.sin(theta)], dtype=np.float32)
+        local = cls._to_actor_local(filled, ctr, vec)
+        return local, ctr, vec
+
+    def _mode_extra_features(
+        self,
+        nb_hist: np.ndarray | None,
+        slot_mask: np.ndarray | None,
+        real_idx: int,
+        arrays: dict[str, np.ndarray],
+    ) -> np.ndarray:
+        extra = np.zeros((self.history_len, self.side_feature_dim), dtype=np.float32)
+        if self.side_feature_dim == 0 or nb_hist is None or slot_mask is None:
+            return extra
+        valid = np.asarray(slot_mask, dtype=bool)
+        if self.feature_mode == "baseline_zero2":
+            return extra
+        if self.feature_mode == "dim_only":
+            extra[valid, 0] = nb_hist[valid, RAW_NB_FEATURES["dim"]]
+        elif self.feature_mode == "I_only":
+            extra[valid, 0] = nb_hist[valid, RAW_NB_FEATURES["I"]]
+        elif self.feature_mode == "shuffled_I":
+            vals = self._shuffled_i_values(real_idx, arrays)
+            if vals.size:
+                extra[valid, 0] = np.resize(vals, int(valid.sum()))
+        elif self.feature_mode == "dimI":
+            extra[valid, 0] = nb_hist[valid, RAW_NB_FEATURES["dim"]]
+            extra[valid, 1] = nb_hist[valid, RAW_NB_FEATURES["I"]]
+        return extra
+
+    def _shuffled_i_values(self, real_idx: int, arrays: dict[str, np.ndarray]) -> np.ndarray:
+        """Deterministically sample I values from another sample to break pairing."""
+        n = int(arrays["x_nb"].shape[0])
+        if n <= 1:
+            return np.empty((0,), dtype=np.float32)
+        source_idx = int((real_idx * 9973 + 7919) % n)
+        if source_idx == real_idx:
+            source_idx = (source_idx + 1) % n
+        src_nb = np.asarray(arrays["x_nb"][source_idx], dtype=np.float32)
+        src_mask = np.asarray(arrays["nb_mask"][source_idx], dtype=bool)
+        vals = src_nb[..., RAW_NB_FEATURES["I"]][src_mask]
+        rng = np.random.default_rng(real_idx + 20260916)
+        vals = np.asarray(vals, dtype=np.float32).copy()
+        rng.shuffle(vals)
+        return vals
 
     def _load_sample_pose_cache(self) -> None:
         if self.dataset_name != "exiD" or self.lane_cache_root is None:
@@ -137,44 +251,42 @@ class NeighFormerSIMPLDataset(Dataset):
         nb = np.array(arrays["x_nb"][real_idx], dtype=np.float32, copy=True)
         mask = np.array(arrays["nb_mask"][real_idx], dtype=bool, copy=True)
         fut = np.array(arrays["y"][real_idx], dtype=np.float32, copy=True)
-        slots = np.flatnonzero(mask.any(axis=0))
+        # Upstream SIMPL keeps actors observed at the current/reference step.
+        slots = np.flatnonzero(mask[-1])
         n_agents = 1 + int(slots.size)
-        th, tf, feat_dim = self.history_len, self.future_len, self.actor_feature_dim
+        th, tf = self.history_len, self.future_len
 
-        trajs_obs = np.zeros((n_agents, th, feat_dim), dtype=np.float32)
-        trajs_obs[0, :, :6] = ego
-        if feat_dim > 6:
-            trajs_obs[0, :, 6:] = -1.0
+        scene_obs = np.zeros((n_agents, th, 2), dtype=np.float32)
+        trajs_obs = np.zeros((n_agents, th, 2), dtype=np.float32)
+        actor_extra = np.zeros((n_agents, th, self.side_feature_dim), dtype=np.float32)
         pad_obs = np.zeros((n_agents, th), dtype=np.float32)
+        scene_obs[0] = ego[:, 0:2]
         pad_obs[0] = 1.0
+        trajs_obs[0], ego_ctr, ego_vec = self._actor_local_positions(scene_obs[0], pad_obs[0].astype(bool))
 
         centers = np.zeros((n_agents, 2), dtype=np.float32)
         vecs = np.zeros((n_agents, 2), dtype=np.float32)
-        centers[0] = ego[-1, 0:2]
-        vecs[0] = ego[-1, 2:4]
+        centers[0] = ego_ctr
+        vecs[0] = ego_vec
         for offset, slot in enumerate(slots, start=1):
             nb_hist = nb[:, slot]
             slot_mask = mask[:, slot]
-            trajs_obs[offset, :, :6] = np.stack(
+            scene_obs[offset] = np.stack(
                 [
-                    ego[:, 0] + nb_hist[:, 0],
-                    ego[:, 1] + nb_hist[:, 1],
-                    ego[:, 2] + nb_hist[:, 2],
-                    ego[:, 3] + nb_hist[:, 3],
-                    ego[:, 4] + nb_hist[:, 4],
-                    ego[:, 5] + nb_hist[:, 5],
+                    ego[:, 0] + nb_hist[:, RAW_NB_FEATURES["dx"]],
+                    ego[:, 1] + nb_hist[:, RAW_NB_FEATURES["dy"]],
                 ],
                 axis=-1,
             )
-            if feat_dim > 6:
-                trajs_obs[offset, :, 6:] = nb_hist[:, [8, 9]]
-            trajs_obs[offset, ~slot_mask] = 0.0
             pad_obs[offset] = slot_mask.astype(np.float32)
-            centers[offset] = trajs_obs[offset, -1, 0:2]
-            vecs[offset] = trajs_obs[offset, -1, 2:4]
+            trajs_obs[offset], centers[offset], vecs[offset] = self._actor_local_positions(
+                scene_obs[offset],
+                slot_mask,
+            )
+            actor_extra[offset] = self._mode_extra_features(nb_hist, slot_mask, real_idx, arrays)
 
         trajs_fut = np.zeros((n_agents, tf, 2), dtype=np.float32)
-        trajs_fut[0] = fut
+        trajs_fut[0] = self._to_actor_local(fut, centers[0], vecs[0])
         pad_fut = np.zeros((n_agents, tf), dtype=np.float32)
         pad_fut[0] = 1.0
         if self.has_neighbor_future and "y_nb" in arrays and "y_nb_mask" in arrays:
@@ -184,7 +296,7 @@ class NeighFormerSIMPLDataset(Dataset):
                 if slot >= y_nb.shape[1]:
                     continue
                 valid = y_nb_mask[:, slot]
-                trajs_fut[offset, valid] = y_nb[valid, slot, 0:2]
+                trajs_fut[offset, valid] = self._to_actor_local(y_nb[valid, slot, 0:2], centers[offset], vecs[offset])
                 pad_fut[offset, valid] = 1.0
 
         graph = self._lane_graph(real_idx, arrays)
@@ -205,6 +317,7 @@ class NeighFormerSIMPLDataset(Dataset):
             "TRAJS_FUT": trajs_fut,
             "PAD_OBS": pad_obs,
             "PAD_FUT": pad_fut,
+            "ACTOR_EXTRA": actor_extra,
             "TRAJS_CTRS": centers,
             "TRAJS_VECS": vecs,
             "LANE_GRAPH": graph,
@@ -278,19 +391,35 @@ class NeighFormerSIMPLDataset(Dataset):
         data["TRAJS_FUT"] = [torch.from_numpy(x) for x in data["TRAJS_FUT"]]
         data["PAD_OBS"] = [torch.from_numpy(x) for x in data["PAD_OBS"]]
         data["PAD_FUT"] = [torch.from_numpy(x) for x in data["PAD_FUT"]]
+        data["ACTOR_EXTRA"] = [torch.from_numpy(x) for x in data["ACTOR_EXTRA"]]
         data["LANE_GRAPH"] = [{k: torch.from_numpy(v) if isinstance(v, np.ndarray) else v for k, v in g.items()}
                               for g in data["LANE_GRAPH"]]
-        data["ACTORS"], data["ACTOR_IDCS"] = self.actor_gather(data["TRAJS_OBS"])
+        data["ACTORS"], data["ACTOR_IDCS"] = self.actor_gather(
+            data["TRAJS_OBS"],
+            data["PAD_OBS"],
+            data["ACTOR_EXTRA"],
+        )
         data["LANES"], data["LANE_IDCS"] = self.graph_gather(data["LANE_GRAPH"])
         return data
 
-    def actor_gather(self, actors: list[torch.Tensor]) -> tuple[torch.Tensor, list[torch.Tensor]]:
+    def actor_gather(
+        self,
+        actors: list[torch.Tensor],
+        pad_flags: list[torch.Tensor],
+        actor_extra: list[torch.Tensor],
+    ) -> tuple[torch.Tensor, list[torch.Tensor]]:
         actor_idcs = []
         count = 0
         for a in actors:
             actor_idcs.append(torch.arange(count, count + a.shape[0], dtype=torch.long))
             count += a.shape[0]
-        return torch.cat([x.transpose(1, 2) for x in actors], dim=0), actor_idcs
+        act_feats = []
+        for pos, valid, extra in zip(actors, pad_flags, actor_extra):
+            vel = torch.zeros_like(pos)
+            vel[:, 1:, :] = pos[:, 1:, :] - pos[:, :-1, :]
+            feat = torch.cat([vel, valid.unsqueeze(2), extra], dim=2)
+            act_feats.append(feat.transpose(1, 2))
+        return torch.cat(act_feats, dim=0), actor_idcs
 
     def graph_gather(self, graphs: list[dict[str, Any]]) -> tuple[torch.Tensor, list[torch.Tensor]]:
         lane_idcs = []
@@ -330,8 +459,10 @@ class NeighFormerSIMPLDataset(Dataset):
             "future_len": self.future_len,
             "max_neighbors": self.max_neighbors,
             "actor_feature_dim": self.actor_feature_dim,
-            "neighbor_indices": [int(v) for v in self.nb_feature_indices],
-            "neighbor_names": self.nb_feature_names,
+            "actor_feature_names": self.actor_feature_names,
+            "base_actor_features": BASE_ACTOR_FEATURE_NAMES,
+            "extra_feature_names": self.extra_feature_names,
+            "raw_neighbor_feature_indices": dict(RAW_NB_FEATURES),
             "lane_cache_root": str(self.lane_cache_root) if self.lane_cache_root else None,
             "lane_radius": self.lane_radius,
             "lane_max_segments": self.lane_max_segments,
@@ -349,13 +480,14 @@ class NeighFormerSIMPLDataset(Dataset):
             mask = np.asarray(arrays["nb_mask"][real_idx], dtype=bool)
             nb = np.asarray(arrays["x_nb"][real_idx], dtype=np.float32)
             if mask.any():
-                rows.append(nb[mask][:, self.nb_feature_indices])
+                rows.append(nb[mask][:, [RAW_NB_FEATURES["dim"], RAW_NB_FEATURES["I"]]])
         if not rows:
             return {}
         stacked = np.concatenate(rows, axis=0)
         return {
             "samples_inspected": n,
             "neighbor_rows": int(stacked.shape[0]),
+            "mode_actor_features": self.actor_feature_names,
             "per_channel": {
                 name: {
                     "min": float(stacked[:, i].min()),
@@ -363,6 +495,6 @@ class NeighFormerSIMPLDataset(Dataset):
                     "mean": float(stacked[:, i].mean()),
                     "nonzero_fraction": float((stacked[:, i] != 0).mean()),
                 }
-                for i, name in enumerate(self.nb_feature_names)
+                for i, name in enumerate(["dim", "I"])
             },
         }
