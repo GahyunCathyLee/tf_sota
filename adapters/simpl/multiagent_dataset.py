@@ -11,6 +11,7 @@ from torch.utils.data import Dataset
 
 from adapters.multiagent_common import MultiAgentArrays, meta_dict, scene_agent_indices, scored_local_indices
 from adapters.simpl.dataset import NeighFormerSIMPLDataset, build_rpe
+from adapters.simpl.lane_graph import empty_graph
 
 
 class MultiAgentSIMPLDataset(Dataset):
@@ -92,22 +93,7 @@ class MultiAgentSIMPLDataset(Dataset):
         }
 
     def _pseudo_lane_graph(self) -> dict[str, np.ndarray | int]:
-        xs = np.linspace(-self.lane_half_length, self.lane_half_length, 11, dtype=np.float32)
-        ctrs = np.stack([xs[:-1], np.zeros(xs.shape[0] - 1, dtype=np.float32)], axis=-1)
-        vecs = np.stack([np.diff(xs), np.zeros(xs.shape[0] - 1, dtype=np.float32)], axis=-1)
-        n = ctrs.shape[0]
-        return {
-            "num_lanes": int(n),
-            "node_ctrs": ctrs,
-            "node_vecs": vecs,
-            "turn": np.zeros((n, 2), dtype=np.float32),
-            "control": np.zeros((n,), dtype=np.float32),
-            "intersect": np.zeros((n,), dtype=np.float32),
-            "left": np.zeros((n,), dtype=np.float32),
-            "right": np.zeros((n,), dtype=np.float32),
-            "lane_ctrs": ctrs,
-            "lane_vecs": vecs,
-        }
+        return empty_graph(self.lane_half_length)
 
     def collate_fn(self, batch: list[dict[str, Any]]) -> dict[str, Any]:
         return NeighFormerSIMPLDataset.collate_fn(self, batch)
