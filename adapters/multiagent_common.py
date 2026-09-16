@@ -18,6 +18,7 @@ MULTIAGENT_ARRAYS = (
     "agent_width",
     "agent_type",
     "heading",
+    "ego_index",
     "recordingId",
     "ego_trackId",
     "t0_frame",

@@ -362,6 +362,9 @@ def main(argv: list[str] | None = None) -> int:
             "train",
             indices=multiagent_indices(train_path, cfg.get("max_train_samples")),
             lane_half_length=cfg["lane_half_length"],
+            lane_cache_root=lane_cache_root if lane_cache_exists else None,
+            lane_radius=cfg["lane_radius"],
+            lane_max_segments=cfg["lane_max_segments"],
         )
         val_ds = MultiAgentSIMPLDataset(
             val_path,
@@ -369,9 +372,11 @@ def main(argv: list[str] | None = None) -> int:
             "val",
             indices=multiagent_indices(val_path, cfg.get("max_eval_samples")),
             lane_half_length=cfg["lane_half_length"],
+            lane_cache_root=lane_cache_root if lane_cache_exists else None,
+            lane_radius=cfg["lane_radius"],
+            lane_max_segments=cfg["lane_max_segments"],
         )
         data_path = train_path.parent
-        lane_cache_exists = False
     else:
         train_idx = subset_indices(np.load(split_indices_path(data_root, cfg["dataset"], "train")), cfg.get("max_train_samples"))
         val_idx = subset_indices(np.load(split_indices_path(data_root, cfg["dataset"], "val")), cfg.get("max_eval_samples"))

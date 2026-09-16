@@ -11,7 +11,7 @@ from torch.utils.data import Dataset
 
 from adapters.multiagent_common import MultiAgentArrays, meta_dict, scene_agent_indices, scored_local_indices
 from adapters.simpl.dataset import NeighFormerSIMPLDataset, build_rpe
-from adapters.simpl.lane_graph import empty_graph
+from adapters.simpl.lane_graph import empty_graph, graph_from_segments, load_cache, rotate_to_heading, translate_to_origin
 
 
 class MultiAgentSIMPLDataset(Dataset):
@@ -24,6 +24,9 @@ class MultiAgentSIMPLDataset(Dataset):
         split: str,
         indices: np.ndarray | None = None,
         lane_half_length: float = 120.0,
+        lane_cache_root: str | Path | None = None,
+        lane_radius: float = 120.0,
+        lane_max_segments: int = 192,
     ) -> None:
         self.data_dir = Path(data_dir)
         self.dataset_name = dataset_name
@@ -33,6 +36,11 @@ class MultiAgentSIMPLDataset(Dataset):
         self.history_len = self.store.history_len
         self.future_len = self.store.future_len
         self.lane_half_length = float(lane_half_length)
+        self.lane_cache_root = Path(lane_cache_root) if lane_cache_root else None
+        self.lane_radius = float(lane_radius)
+        self.lane_max_segments = int(lane_max_segments)
+        self._recording_cache: dict[int, dict[str, Any] | None] = {}
+        self._warned_lane_cache = False
         self.actor_feature_names = ["step_dx", "step_dy", "valid"]
         self.actor_feature_dim = 3
 
@@ -70,7 +78,7 @@ class MultiAgentSIMPLDataset(Dataset):
             if bool(valid.any()):
                 trajs_fut[i, valid] = NeighFormerSIMPLDataset._to_actor_local(y[src, valid, 0:2], centers[i], vecs[i])
 
-        lane_graph = self._pseudo_lane_graph()
+        lane_graph = self._lane_graph(scene_idx, arrays)
         scene_ctrs = torch.cat([torch.from_numpy(centers), torch.from_numpy(lane_graph["lane_ctrs"])], dim=0)
         scene_vecs = torch.cat([torch.from_numpy(vecs), torch.from_numpy(lane_graph["lane_vecs"])], dim=0)
         rpe = build_rpe(scene_ctrs, scene_vecs)
@@ -94,6 +102,55 @@ class MultiAgentSIMPLDataset(Dataset):
 
     def _pseudo_lane_graph(self) -> dict[str, np.ndarray | int]:
         return empty_graph(self.lane_half_length)
+
+    def _warn_lane_cache_once(self, message: str) -> None:
+        if not self._warned_lane_cache:
+            print(f"[WARN] SIMPL multi-agent lane graph fallback: {message}", flush=True)
+            self._warned_lane_cache = True
+
+    def _load_recording_cache(self, recording_id: int) -> dict[str, Any] | None:
+        if recording_id in self._recording_cache:
+            return self._recording_cache[recording_id]
+        if self.lane_cache_root is None:
+            self._recording_cache[recording_id] = None
+            return None
+        candidates = [
+            self.lane_cache_root / f"recording_{recording_id:02d}.pkl",
+            self.lane_cache_root / f"recording_{recording_id}.pkl",
+        ]
+        path = next((p for p in candidates if p.exists()), None)
+        cache = load_cache(path) if path is not None else None
+        self._recording_cache[recording_id] = cache
+        return cache
+
+    def _lane_graph(self, scene_idx: int, arrays: dict[str, np.ndarray]) -> dict[str, np.ndarray | int]:
+        if self.lane_cache_root is None:
+            return self._pseudo_lane_graph()
+        recording_id = int(arrays["recordingId"][scene_idx]) if "recordingId" in arrays else -1
+        cache = self._load_recording_cache(recording_id)
+        if cache is None:
+            self._warn_lane_cache_once(f"cache for recording {recording_id} was not found in {self.lane_cache_root}")
+            return self._pseudo_lane_graph()
+
+        ego_index = int(arrays["ego_index"][scene_idx]) if "ego_index" in arrays else 0
+        x = np.asarray(arrays["x_agents"][scene_idx, ego_index, -1, 0:2], dtype=np.float32)
+        segments = np.asarray(cache.get("segments", np.zeros((0, 11, 2), dtype=np.float32)), dtype=np.float32)
+        left = np.asarray(cache.get("left", np.zeros((segments.shape[0],), dtype=np.float32)), dtype=np.float32)
+        right = np.asarray(cache.get("right", np.zeros((segments.shape[0],), dtype=np.float32)), dtype=np.float32)
+        if self.dataset_name == "exiD" and "heading" in arrays:
+            heading = float(arrays["heading"][scene_idx, ego_index, -1])
+            transform = lambda points: rotate_to_heading(points, float(x[0]), float(x[1]), heading)
+        else:
+            transform = lambda points: translate_to_origin(points, float(x[0]), float(x[1]))
+        return graph_from_segments(
+            segments,
+            transform,
+            left,
+            right,
+            radius=self.lane_radius,
+            max_segments=self.lane_max_segments,
+            fallback_half_length=self.lane_half_length,
+        )
 
     def collate_fn(self, batch: list[dict[str, Any]]) -> dict[str, Any]:
         return NeighFormerSIMPLDataset.collate_fn(self, batch)
