@@ -8,6 +8,7 @@ import json
 import platform
 import random
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -387,6 +388,7 @@ def main(argv: list[str] | None = None) -> int:
         total_loss = 0.0
         total_tokens = 0
         n_batches = 0
+        epoch_start = time.perf_counter()
         for raw in train_loader:
             batch = move_batch(raw, device)
             loss, parts = model.loss(batch)
@@ -405,7 +407,8 @@ def main(argv: list[str] | None = None) -> int:
             f"Epoch {epoch:03d}/{int(cfg['epochs'])} "
             f"loss={train_loss:.4f} val_loss={last_val['loss']:.4f} "
             f"ADE={last_val['ade']:.3f} FDE={last_val['fde']:.3f} RMSE={last_val['rmse']:.3f} "
-            f"tokens={total_tokens} best={'*' if is_best else '-'}"
+            f"tokens={total_tokens} best={'*' if is_best else '-'} "
+            f"elapsed={(time.perf_counter() - epoch_start) / 60.0:.1f}m"
         )
         ckpt = {
             "epoch": epoch,

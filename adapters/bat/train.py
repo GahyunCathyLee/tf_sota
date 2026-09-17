@@ -7,6 +7,7 @@ import argparse
 import json
 import random
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -507,6 +508,7 @@ def main(argv: list[str] | None = None) -> int:
         gd_encoder.train()
         generator.train()
         total = 0.0
+        epoch_start = time.perf_counter()
         for step, raw in enumerate(train_loader, start=1):
             batch = move_batch(raw, device)
             pred, lat_pred, lon_pred = forward_models(gd_encoder, generator, batch)
@@ -522,10 +524,19 @@ def main(argv: list[str] | None = None) -> int:
             opt_g.step()
             total += float(loss.detach())
             if step % int(cfg["log_interval"]) == 0:
-                print(f"epoch {epoch:03d} step {step:05d}/{len(train_loader):05d} loss={total / step:.4f}", flush=True)
+                print(
+                    f"epoch {epoch:03d} step {step:05d}/{len(train_loader):05d} "
+                    f"loss={total / step:.4f} elapsed={(time.perf_counter() - epoch_start) / 60.0:.1f}m",
+                    flush=True,
+                )
         metrics, val_loss = evaluate_epoch(gd_encoder, generator, val_loader, device, cfg, train_ds)
         metrics["val_loss"] = val_loss
-        print(f"epoch {epoch:03d} train_loss={total / max(1, len(train_loader)):.4f} val_loss={val_loss:.4f} ade={metrics.get('ade', float('nan')):.4f} fde={metrics.get('fde', float('nan')):.4f}")
+        print(
+            f"epoch {epoch:03d} train_loss={total / max(1, len(train_loader)):.4f} "
+            f"val_loss={val_loss:.4f} ade={metrics.get('ade', float('nan')):.4f} "
+            f"fde={metrics.get('fde', float('nan')):.4f} "
+            f"elapsed={(time.perf_counter() - epoch_start) / 60.0:.1f}m"
+        )
         save_checkpoint(ckpt_dir / "last.pt", gd_encoder, generator, cfg, model_args, epoch, metrics)
         if float(metrics.get("fde", float("inf"))) < best_fde:
             best_fde = float(metrics["fde"])

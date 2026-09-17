@@ -445,6 +445,12 @@ def make_epoch_logger() -> Any:
     from lightning.pytorch.callbacks import Callback
 
     class EpochLogger(Callback):
+        def __init__(self) -> None:
+            self.epoch_start = time.perf_counter()
+
+        def on_train_epoch_start(self, trainer, pl_module):
+            self.epoch_start = time.perf_counter()
+
         # on_train_epoch_end runs after the validation loop, so both the epoch's
         # train_loss and its val metrics are already in callback_metrics.
         def on_train_epoch_end(self, trainer, pl_module):
@@ -457,13 +463,14 @@ def make_epoch_logger() -> Any:
                 return float(v) if v is not None else float("nan")
 
             LOGGER.info(
-                "epoch %3d/%-3d  loss=%.4f  val_ade=%.4f  val_fde=%.4f  val_nll=%.4g",
+                "epoch %3d/%-3d  loss=%.4f  val_ade=%.4f  val_fde=%.4f  val_nll=%.4g  elapsed=%.1fm",
                 trainer.current_epoch + 1,
                 trainer.max_epochs,
                 get("train_loss"),
                 get("val_ade"),
                 get("val_fde"),
                 get("val_nll"),
+                (time.perf_counter() - self.epoch_start) / 60.0,
             )
 
     return EpochLogger()

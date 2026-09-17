@@ -8,6 +8,7 @@ import json
 import random
 import shutil
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -230,10 +231,12 @@ def make_stdout_progress_callback(log_every_n_steps: int) -> Any:
     class StdoutProgressCallback(pl.Callback):
         def __init__(self, every_n_steps: int) -> None:
             self.every_n_steps = max(1, int(every_n_steps))
+            self.epoch_start = time.perf_counter()
 
         def on_train_epoch_start(self, trainer: Any, pl_module: Any) -> None:
+            self.epoch_start = time.perf_counter()
             total = trainer.num_training_batches
-            print(f"[TRAIN] epoch {trainer.current_epoch + 1}/{trainer.max_epochs} start  batches={total}", flush=True)
+            print(f"[TRAIN] epoch {trainer.current_epoch + 1}/{trainer.max_epochs} start  batches={total} elapsed=0.0m", flush=True)
 
         def on_train_batch_end(self, trainer: Any, pl_module: Any, outputs: Any, batch: Any, batch_idx: int) -> None:
             step = batch_idx + 1
@@ -254,12 +257,17 @@ def make_stdout_progress_callback(log_every_n_steps: int) -> Any:
                     loss_text = ""
             print(
                 f"[TRAIN] epoch {trainer.current_epoch + 1}/{trainer.max_epochs} "
-                f"step {step}/{total} global_step={trainer.global_step}{loss_text}",
+                f"step {step}/{total} global_step={trainer.global_step}{loss_text} "
+                f"elapsed={(time.perf_counter() - self.epoch_start) / 60.0:.1f}m",
                 flush=True,
             )
 
         def on_validation_epoch_start(self, trainer: Any, pl_module: Any) -> None:
-            print(f"[VAL] epoch {trainer.current_epoch + 1}/{trainer.max_epochs} start", flush=True)
+            print(
+                f"[VAL] epoch {trainer.current_epoch + 1}/{trainer.max_epochs} start "
+                f"elapsed={(time.perf_counter() - self.epoch_start) / 60.0:.1f}m",
+                flush=True,
+            )
 
         def on_validation_epoch_end(self, trainer: Any, pl_module: Any) -> None:
             metrics = []
@@ -271,7 +279,11 @@ def make_stdout_progress_callback(log_every_n_steps: int) -> Any:
                     except (TypeError, ValueError):
                         pass
             suffix = "  " + " ".join(metrics) if metrics else ""
-            print(f"[VAL] epoch {trainer.current_epoch + 1}/{trainer.max_epochs} done{suffix}", flush=True)
+            print(
+                f"[VAL] epoch {trainer.current_epoch + 1}/{trainer.max_epochs} done{suffix} "
+                f"elapsed={(time.perf_counter() - self.epoch_start) / 60.0:.1f}m",
+                flush=True,
+            )
 
     return StdoutProgressCallback(log_every_n_steps)
 

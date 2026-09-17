@@ -7,6 +7,7 @@ import argparse
 import json
 import random
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -569,6 +570,7 @@ def main(argv: list[str] | None = None) -> int:
         model.train()
         total_loss = 0.0
         batches = 0
+        epoch_start = time.perf_counter()
         for it, batch in enumerate(train_loader, start=1):
             batch = move_batch_to_device(batch, device)
             optimizer.zero_grad(set_to_none=True)
@@ -581,13 +583,15 @@ def main(argv: list[str] | None = None) -> int:
             if it == 1 or it % int(cfg["log_interval"]) == 0 or it == len(train_loader):
                 print(
                     f"epoch={epoch + 1}/{cfg['epochs']} iter={it}/{len(train_loader)} "
-                    f"loss={float(loss.detach()):.4f}",
+                    f"loss={float(loss.detach()):.4f} "
+                    f"elapsed={(time.perf_counter() - epoch_start) / 60.0:.1f}m",
                     flush=True,
                 )
         metrics = evaluate_epoch(model, val_loader, device, float(cfg["dt"]), float(cfg["eval_hz"]))
         print(
             f"val epoch={epoch + 1}: ade={metrics.get('ade', float('nan')):.4f} "
-            f"fde={metrics.get('fde', float('nan')):.4f} loss={total_loss / max(1, batches):.4f}",
+            f"fde={metrics.get('fde', float('nan')):.4f} loss={total_loss / max(1, batches):.4f} "
+            f"elapsed={(time.perf_counter() - epoch_start) / 60.0:.1f}m",
             flush=True,
         )
         state = {

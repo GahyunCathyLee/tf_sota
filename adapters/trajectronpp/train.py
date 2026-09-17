@@ -574,8 +574,9 @@ def main(argv: list[str] | None = None) -> int:
         )
         assert proc.stdout is not None
         for line in proc.stdout:
-            print(line, end="", flush=True)
-            log_file.write(line)
+            prefixed = f"[elapsed={(time.time() - started) / 60.0:.1f}m] {line}"
+            print(prefixed, end="", flush=True)
+            log_file.write(prefixed)
             log_file.flush()
         returncode = proc.wait()
     if returncode != 0:

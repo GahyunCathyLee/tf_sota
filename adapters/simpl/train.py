@@ -483,7 +483,8 @@ def main(argv: list[str] | None = None) -> int:
         print(
             f"Epoch {epoch:03d}/{int(cfg['epochs'])} "
             f"loss={train_loss:.4f} val_loss={val['loss']:.4f} "
-            f"ADE={val['ade']:.3f} FDE={val['fde']:.3f} RMSE={val['rmse']:.3f}"
+            f"ADE={val['ade']:.3f} FDE={val['fde']:.3f} RMSE={val['rmse']:.3f} "
+            f"elapsed={(time.perf_counter() - epoch_start) / 60.0:.1f}m"
         )
         ckpt = {
             "epoch": epoch,
