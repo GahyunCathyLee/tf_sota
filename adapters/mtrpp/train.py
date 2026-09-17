@@ -483,9 +483,23 @@ def main(argv: list[str] | None = None) -> int:
 
     if cfg.get("multiagent"):
         progress("building train dataset")
-        train_ds = MultiAgentMTRDataset(train_path, cfg["dataset"], "train", indices=train_idx, **builder_kwargs)
+        train_ds = MultiAgentMTRDataset(
+            train_path,
+            cfg["dataset"],
+            "train",
+            indices=train_idx,
+            target_agent_mode=True,
+            **builder_kwargs,
+        )
         progress("building val dataset")
-        val_ds = MultiAgentMTRDataset(val_path, cfg["dataset"], "val", indices=val_idx, **builder_kwargs)
+        val_ds = MultiAgentMTRDataset(
+            val_path,
+            cfg["dataset"],
+            "val",
+            indices=val_idx,
+            target_agent_mode=True,
+            **builder_kwargs,
+        )
     else:
         progress("building train dataset")
         train_ds = NeighFormerMTRDataset(

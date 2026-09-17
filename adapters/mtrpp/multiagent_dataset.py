@@ -21,6 +21,7 @@ class MultiAgentMTRDataset:
         dataset_name: str,
         split: str,
         indices: np.ndarray | None = None,
+        target_agent_mode: bool = False,
         dt: float = 1.0 / 3.0,
         map_polylines: int = 9,
         map_points_each_polyline: int = 20,
@@ -31,7 +32,8 @@ class MultiAgentMTRDataset:
         self.dataset_name = dataset_name
         self.split = split
         self.store = MultiAgentArrays(self.data_dir)
-        self.indices = np.arange(self.store.num_scenes, dtype=np.int64) if indices is None else np.asarray(indices, dtype=np.int64)
+        self.scene_indices = np.arange(self.store.num_scenes, dtype=np.int64) if indices is None else np.asarray(indices, dtype=np.int64)
+        self.target_agent_mode = bool(target_agent_mode)
         self.history_len = self.store.history_len
         self.future_len = self.store.future_len
         self.dt = float(dt)
@@ -42,13 +44,44 @@ class MultiAgentMTRDataset:
         self.lane_width = float(lane_width)
         self.agent_attr_dim = 6 + 5 + (self.history_len + 1) + 2 + 2 + 2
         self.builder = self
+        self._target_scene_indices: np.ndarray | None = None
+        self._target_agent_indices: np.ndarray | None = None
+        if self.target_agent_mode:
+            self._build_target_index()
+
+    def _build_target_index(self) -> None:
+        arrays = self.store.open()
+        scenes: list[int] = []
+        agents: list[int] = []
+        for scene_idx in self.scene_indices.tolist():
+            agent_ids = np.asarray(arrays["agent_ids"][scene_idx])
+            obs = np.asarray(arrays["obs_valid"][scene_idx], dtype=bool)
+            scored = np.asarray(arrays["scored_agent_mask"][scene_idx], dtype=bool)
+            keep = scene_agent_indices(agent_ids, obs)
+            scored_local = scored_local_indices(scored, keep)
+            if scored_local.size == 0 and keep.size:
+                scored_local = np.asarray([0], dtype=np.int64)
+            for local_i in scored_local.tolist():
+                scenes.append(int(scene_idx))
+                agents.append(int(keep[int(local_i)]))
+        self._target_scene_indices = np.asarray(scenes, dtype=np.int64)
+        self._target_agent_indices = np.asarray(agents, dtype=np.int64)
 
     def __len__(self) -> int:
-        return int(self.indices.size)
+        if self.target_agent_mode:
+            assert self._target_scene_indices is not None
+            return int(self._target_scene_indices.size)
+        return int(self.scene_indices.size)
 
     def __getitem__(self, idx: int) -> dict[str, Any]:
         arrays = self.store.open()
-        scene_idx = int(self.indices[idx])
+        forced_target_agent = None
+        if self.target_agent_mode:
+            assert self._target_scene_indices is not None and self._target_agent_indices is not None
+            scene_idx = int(self._target_scene_indices[idx])
+            forced_target_agent = int(self._target_agent_indices[idx])
+        else:
+            scene_idx = int(self.scene_indices[idx])
         agent_ids = np.asarray(arrays["agent_ids"][scene_idx])
         x = np.asarray(arrays["x_agents"][scene_idx], dtype=np.float32)
         obs = np.asarray(arrays["obs_valid"][scene_idx], dtype=bool)
@@ -59,6 +92,9 @@ class MultiAgentMTRDataset:
         widths = np.asarray(arrays["agent_width"][scene_idx], dtype=np.float32)
         keep = scene_agent_indices(agent_ids, obs)
         scored_local = scored_local_indices(scored, keep)
+        if forced_target_agent is not None:
+            where = np.flatnonzero(keep == forced_target_agent)
+            scored_local = where[:1].astype(np.int64)
         if scored_local.size == 0:
             scored_local = np.asarray([0], dtype=np.int64)
         n_obj = int(keep.size)
@@ -186,11 +222,13 @@ class MultiAgentMTRDataset:
             "dataset": self.dataset_name,
             "split": self.split,
             "data_dir": str(self.data_dir),
-            "num_scenes": len(self),
+            "num_samples": len(self),
+            "num_source_scenes": int(self.scene_indices.size),
             "history_len": self.history_len,
             "future_len": self.future_len,
             "agent_attr_dim": self.agent_attr_dim,
             "source": "multiagent",
+            "target_agent_mode": self.target_agent_mode,
         }
 
     def channel_stats(self, n_samples: int = 256) -> dict[str, Any]:
@@ -199,7 +237,11 @@ class MultiAgentMTRDataset:
         retained = []
         scored = []
         for j in range(n):
-            scene_idx = int(self.indices[j])
+            if self.target_agent_mode:
+                assert self._target_scene_indices is not None
+                scene_idx = int(self._target_scene_indices[j])
+            else:
+                scene_idx = int(self.scene_indices[j])
             retained.append(int(np.count_nonzero(arrays["agent_ids"][scene_idx] >= 0)))
             scored.append(int(np.count_nonzero(arrays["scored_agent_mask"][scene_idx])))
         return {
