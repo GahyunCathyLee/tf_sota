@@ -18,15 +18,19 @@ EXPERIMENT_ROOT = ADAPTER_DIR.parents[1]
 sys.path.insert(0, str(EXPERIMENT_ROOT))
 
 from adapters.common import dataset_dir, print_hparam_summary, split_indices_path  # noqa: E402
+from adapters.multiagent_common import multiagent_indices, multiagent_split_dir  # noqa: E402
 from adapters.hivt.dataset import NeighFormerHiVTDataset  # noqa: E402
+from adapters.hivt.multiagent_dataset import MultiAgentHiVTDataset  # noqa: E402
 from adapters.hivt.train import format_path_template, resolve_path  # noqa: E402
 from adapters.hivt.upstream import add_upstream_to_path  # noqa: E402
 from adapters.mtp_go.metrics import (  # noqa: E402
     MetricAccumulator,
     SampleMetaLookup,
+    SceneMetricAccumulator,
     load_scenario_labels,
     print_latency,
     print_metrics,
+    print_scene_metrics,
     print_scenario_results,
 )
 
@@ -39,6 +43,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--batch-size", type=int)
     p.add_argument("--num-workers", type=int)
     p.add_argument("--device")
+    p.add_argument("--multiagent", action="store_true", help="Use data/{dataset}_multiagent/{split}_full arrays")
     p.add_argument("--scenario", action="store_true")
     p.add_argument("--scenario-labels", type=Path)
     p.add_argument("--max-samples", type=int)
@@ -89,18 +94,20 @@ def run_evaluate(
 ):
     model.eval()
     acc = MetricAccumulator(dt=1.0 / float(cfg.get("eval_hz", 3.0)), hz=float(cfg.get("eval_hz", 3.0)))
+    scene_acc = SceneMetricAccumulator()
     historical_steps = int(historical_steps or cfg.get("historical_steps", cfg.get("history_len", 6)))
     for data in loader:
         data = data.to(device)
         pred, target, all_modes, valid_mask, keep = predict_targets(model, data, historical_steps)
+        scene_rows = data.batch[keep].detach().cpu().numpy().reshape(-1)
         label_rows = None
         if labels is not None and labels.enabled:
             sample_indices = data["sample_index"].detach().cpu().numpy().reshape(-1)
             scene_labels = labels.lookup(sample_indices)
-            node_graph = data.batch[keep].detach().cpu().numpy().reshape(-1)
-            label_rows = [scene_labels[int(i)] if scene_labels is not None else None for i in node_graph]
+            label_rows = [scene_labels[int(i)] if scene_labels is not None else None for i in scene_rows]
         acc.update(pred, target, all_modes=all_modes, valid_mask=valid_mask, labels=label_rows)
-    return acc
+        scene_acc.update(all_modes, target, valid_mask, scene_rows)
+    return acc, scene_acc
 
 
 def measure_latency(fn, device: torch.device, warmup: int, iters: int) -> dict[str, float]:
@@ -148,27 +155,33 @@ def main(argv: list[str] | None = None) -> int:
     device = torch.device(args.device) if args.device else torch.device("cuda" if torch.cuda.is_available() else "cpu")
     data_root = resolve_path(args.data_root) if args.data_root else resolve_path(cfg["data_root"])
     cfg = {**cfg, "data_root": str(data_root)}
-    data_path = dataset_dir(data_root, cfg["dataset"])
-    indices = np.load(split_indices_path(data_root, cfg["dataset"], args.split))
-    if args.max_samples is not None:
-        indices = indices[: args.max_samples]
+    use_multiagent = bool(args.multiagent or cfg.get("multiagent"))
     lane_cache_value = args.lane_cache_root or cfg.get("lane_cache_root")
     lane_cache_root = format_path_template(lane_cache_value, cfg) if lane_cache_value else None
     lane_radius = args.lane_radius if args.lane_radius is not None else cfg.get("lane_radius", 120.0)
     lane_max_segments = (
         args.lane_max_segments if args.lane_max_segments is not None else cfg.get("lane_max_segments", 192)
     )
-    ds = NeighFormerHiVTDataset(
-        data_path,
-        indices,
-        cfg["dataset"],
-        cfg["feature_mode"],
-        args.split,
-        cfg["lane_half_length"],
-        lane_cache_root=lane_cache_root,
-        lane_radius=lane_radius,
-        lane_max_segments=lane_max_segments,
-    )
+    if use_multiagent:
+        data_path = multiagent_split_dir(data_root, cfg["dataset"], args.split)
+        indices = multiagent_indices(data_path, args.max_samples)
+        ds = MultiAgentHiVTDataset(data_path, cfg["dataset"], args.split, indices=indices)
+    else:
+        data_path = dataset_dir(data_root, cfg["dataset"])
+        indices = np.load(split_indices_path(data_root, cfg["dataset"], args.split))
+        if args.max_samples is not None:
+            indices = indices[: args.max_samples]
+        ds = NeighFormerHiVTDataset(
+            data_path,
+            indices,
+            cfg["dataset"],
+            cfg["feature_mode"],
+            args.split,
+            cfg["lane_half_length"],
+            lane_cache_root=lane_cache_root,
+            lane_radius=lane_radius,
+            lane_max_segments=lane_max_segments,
+        )
     batch_size = args.batch_size or int(cfg["batch_size"])
     num_workers = args.num_workers if args.num_workers is not None else int(cfg["num_workers"])
     loader = DataLoader(ds, batch_size=batch_size, shuffle=False, num_workers=num_workers,
@@ -180,6 +193,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"[INFO] Checkpoint : {ckpt_path}  (epoch {ckpt.get('epoch', '?')})")
     print(f"[INFO] Upstream   : {upstream_dir}")
     print(f"[INFO] Dataset    : {args.split} split  n={len(ds):,}  {cfg['dataset']} {cfg['feature_mode']}")
+    print(f"[INFO] Source     : {'multiagent' if use_multiagent else 'single-agent'}")
     print(f"[INFO] Lanes      : {lane_cache_root if lane_cache_root else 'pseudo fallback'}")
     gpu = f"  ({torch.cuda.get_device_name(0)})" if device.type == "cuda" else ""
     print(f"[INFO] Device     : {device}{gpu}")
@@ -188,7 +202,7 @@ def main(argv: list[str] | None = None) -> int:
             ("adapter", "HiVT"),
             ("dataset", cfg.get("dataset")),
             ("feature_mode", cfg.get("feature_mode")),
-            ("eval_scope", "ego+neighbors" if ds.has_neighbor_future else "ego_only"),
+            ("eval_scope", "multiagent_scene" if use_multiagent else ("ego+neighbors" if ds.has_neighbor_future else "ego_only")),
             ("checkpoint_epoch", ckpt.get("epoch")),
             ("epochs", cfg.get("epochs")),
             ("batch_size", cfg.get("batch_size")),
@@ -226,10 +240,12 @@ def main(argv: list[str] | None = None) -> int:
         labels_path = args.scenario_labels or (data_path / "scenario_labels.csv")
         labels = SampleMetaLookup(data_path, load_scenario_labels(resolve_path(labels_path)))
 
-    acc = run_evaluate(model, loader, device, cfg, labels, historical_steps=int(model_args["historical_steps"]))
+    acc, scene_acc = run_evaluate(model, loader, device, cfg, labels, historical_steps=int(model_args["historical_steps"]))
     results = acc.result()
+    results.update(scene_acc.result())
     print(f"\n  n_samples = {int(results['n_samples']):,}")
     print_metrics(results)
+    print_scene_metrics(results)
     if labels is not None and acc.has_scenario:
         print_scenario_results(acc.event_stats, "Event")
         print_scenario_results(acc.state_stats, "State")

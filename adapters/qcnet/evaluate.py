@@ -19,15 +19,19 @@ EXPERIMENT_ROOT = ADAPTER_DIR.parents[1]
 sys.path.insert(0, str(EXPERIMENT_ROOT))
 
 from adapters.common import dataset_dir, split_indices_path  # noqa: E402
+from adapters.multiagent_common import multiagent_indices, multiagent_split_dir  # noqa: E402
 from adapters.mtp_go.metrics import (  # noqa: E402
     MetricAccumulator,
     SampleMetaLookup,
+    SceneMetricAccumulator,
     load_scenario_labels,
     print_latency,
     print_metrics,
+    print_scene_metrics,
     print_scenario_results,
 )
 from adapters.qcnet.dataset import NeighFormerQCNetDataset  # noqa: E402
+from adapters.qcnet.multiagent_dataset import MultiAgentQCNetDataset  # noqa: E402
 from adapters.qcnet.train import format_path_template, resolve_path  # noqa: E402
 from adapters.qcnet.upstream import add_upstream_to_path  # noqa: E402
 
@@ -40,6 +44,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--batch-size", type=int)
     p.add_argument("--num-workers", type=int)
     p.add_argument("--device", type=str)
+    p.add_argument("--multiagent", action="store_true", help="Use data/{dataset}_multiagent/{split}_full arrays")
     p.add_argument("--scenario", action="store_true")
     p.add_argument("--scenario-labels", type=Path)
     p.add_argument("--max-samples", type=int)
@@ -80,6 +85,7 @@ def recover_global_trajectories(data, pred: dict[str, torch.Tensor], eval_mask: 
 def run_evaluate(model, loader, device, hz: float, dt: float, labels: SampleMetaLookup | None = None):
     model.eval()
     acc = MetricAccumulator(dt=dt, hz=hz)
+    scene_acc = SceneMetricAccumulator()
     th = int(model.num_historical_steps)
     for data in loader:
         data = data.to(device)
@@ -90,10 +96,15 @@ def run_evaluate(model, loader, device, hz: float, dt: float, labels: SampleMeta
         chosen = all_modes[torch.arange(all_modes.size(0), device=device), best]
         target = data["agent"]["position"][eval_mask, th:, :2]
         all_modes_metric = all_modes.transpose(1, 2)
+        valid_mask = data["agent"]["valid_mask"][eval_mask, th:]
+        scene_rows = data["agent"]["batch"][eval_mask].detach().cpu().numpy().reshape(-1)
         sample_indices = data["sample_index"].detach().cpu().numpy().reshape(-1)
         label_rows = labels.lookup(sample_indices) if labels is not None and labels.enabled else None
-        acc.update(chosen, target, all_modes=all_modes_metric, labels=label_rows)
-    return acc
+        if label_rows is not None:
+            label_rows = [label_rows[int(i)] for i in scene_rows]
+        acc.update(chosen, target, all_modes=all_modes_metric, valid_mask=valid_mask, labels=label_rows)
+        scene_acc.update(all_modes_metric, target, valid_mask, scene_rows)
+    return acc, scene_acc
 
 
 def print_device_info(device: torch.device) -> None:
@@ -160,10 +171,7 @@ def main(argv: list[str] | None = None) -> int:
     device = torch.device(args.device) if args.device else torch.device("cuda" if torch.cuda.is_available() else "cpu")
     data_root = resolve_path(args.data_root) if args.data_root else resolve_path(cfg["data_root"])
     cfg = {**cfg, "data_root": str(data_root)}
-    data_path = dataset_dir(data_root, cfg["dataset"])
-    indices = np.load(split_indices_path(data_root, cfg["dataset"], args.split))
-    if args.max_samples is not None:
-        indices = indices[: args.max_samples]
+    use_multiagent = bool(args.multiagent or cfg.get("multiagent"))
     lane_cache_value = args.lane_cache_root or cfg.get("lane_cache_root")
     lane_cache_root = format_path_template(lane_cache_value, cfg) if lane_cache_value else None
     lane_radius = args.lane_radius if args.lane_radius is not None else cfg.get("lane_radius", 120.0)
@@ -171,17 +179,26 @@ def main(argv: list[str] | None = None) -> int:
         args.lane_max_segments if args.lane_max_segments is not None else cfg.get("lane_max_segments", 192)
     )
 
-    ds = NeighFormerQCNetDataset(
-        data_path,
-        indices,
-        cfg["dataset"],
-        cfg["feature_mode"],
-        args.split,
-        cfg["lane_half_length"],
-        lane_cache_root=lane_cache_root,
-        lane_radius=lane_radius,
-        lane_max_segments=lane_max_segments,
-    )
+    if use_multiagent:
+        data_path = multiagent_split_dir(data_root, cfg["dataset"], args.split)
+        indices = multiagent_indices(data_path, args.max_samples)
+        ds = MultiAgentQCNetDataset(data_path, cfg["dataset"], args.split, indices=indices)
+    else:
+        data_path = dataset_dir(data_root, cfg["dataset"])
+        indices = np.load(split_indices_path(data_root, cfg["dataset"], args.split))
+        if args.max_samples is not None:
+            indices = indices[: args.max_samples]
+        ds = NeighFormerQCNetDataset(
+            data_path,
+            indices,
+            cfg["dataset"],
+            cfg["feature_mode"],
+            args.split,
+            cfg["lane_half_length"],
+            lane_cache_root=lane_cache_root,
+            lane_radius=lane_radius,
+            lane_max_segments=lane_max_segments,
+        )
     batch_size = args.batch_size or int(cfg["batch_size"])
     num_workers = args.num_workers if args.num_workers is not None else int(cfg["num_workers"])
     loader = DataLoader(ds, batch_size=batch_size, shuffle=False, num_workers=num_workers,
@@ -194,6 +211,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"[INFO] Checkpoint : {ckpt_path}  (epoch {ckpt.get('epoch', '?')})")
     print(f"[INFO] Upstream   : {upstream_dir}")
     print(f"[INFO] Dataset    : {args.split} split  n={len(ds):,}  {cfg['dataset']} {cfg['feature_mode']}")
+    print(f"[INFO] Source     : {'multiagent' if use_multiagent else 'single-agent'}")
     print(f"[INFO] Lanes      : {lane_cache_root if lane_cache_root else 'pseudo fallback'}")
     gpu = f"  ({torch.cuda.get_device_name(0)})" if device.type == "cuda" else ""
     print(f"[INFO] Device     : {device}{gpu}")
@@ -218,10 +236,12 @@ def main(argv: list[str] | None = None) -> int:
         labels = SampleMetaLookup(data_path, load_scenario_labels(resolve_path(labels_path)))
 
     dt = 1.0 / float(cfg.get("eval_hz", 3.0))
-    acc = run_evaluate(model, loader, device, float(cfg.get("eval_hz", 3.0)), dt, labels)
+    acc, scene_acc = run_evaluate(model, loader, device, float(cfg.get("eval_hz", 3.0)), dt, labels)
     results = acc.result()
+    results.update(scene_acc.result())
     print(f"\n  n_samples = {int(results['n_samples']):,}")
     print_metrics(results)
+    print_scene_metrics(results)
     if labels is not None and acc.has_scenario:
         print_scenario_results(acc.event_stats, "Event")
         print_scenario_results(acc.state_stats, "State")

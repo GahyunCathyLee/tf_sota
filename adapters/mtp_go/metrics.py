@@ -211,6 +211,88 @@ class MetricAccumulator:
         return out
 
 
+class SceneMetricAccumulator:
+    """Scene-level oracle metrics with one shared mode index per scene.
+
+    `all_modes` must be shaped (N, T, K, 2). `scene_ids` maps each of the N
+    agent trajectories to a scene within the current batch or dataset.
+    """
+
+    def __init__(self) -> None:
+        self.n_scenes = 0
+        self.sum_min_sade = 0.0
+        self.sum_min_sfde = 0.0
+
+    @torch.no_grad()
+    def update(
+        self,
+        all_modes: torch.Tensor,
+        target: torch.Tensor,
+        valid_mask: torch.Tensor | None,
+        scene_ids: list[int] | np.ndarray | torch.Tensor,
+    ) -> None:
+        if all_modes is None or all_modes.numel() == 0:
+            return
+        if all_modes.ndim != 4:
+            raise ValueError(f"all_modes must be (N, T, K, 2), got {all_modes.shape}")
+        if target.ndim != 3:
+            raise ValueError(f"target must be (N, T, 2), got {target.shape}")
+        device = all_modes.device
+        if valid_mask is None:
+            valid_mask = torch.ones(target.shape[:2], dtype=torch.bool, device=device)
+        else:
+            valid_mask = valid_mask.to(device=device, dtype=torch.bool)
+        if isinstance(scene_ids, torch.Tensor):
+            scene_np = scene_ids.detach().cpu().numpy().astype(np.int64).reshape(-1)
+        else:
+            scene_np = np.asarray(scene_ids, dtype=np.int64).reshape(-1)
+        if scene_np.shape[0] != all_modes.shape[0]:
+            raise ValueError(f"scene_ids length {scene_np.shape[0]} does not match all_modes N={all_modes.shape[0]}")
+
+        for scene_id in np.unique(scene_np):
+            row_ids = np.flatnonzero(scene_np == int(scene_id))
+            if row_ids.size == 0:
+                continue
+            idx = torch.as_tensor(row_ids, dtype=torch.long, device=device)
+            modes_s = all_modes[idx]
+            target_s = target[idx]
+            valid_s = valid_mask[idx]
+            valid_agent = valid_s.any(dim=-1)
+            if not bool(valid_agent.any()):
+                continue
+            modes_s = modes_s[valid_agent]
+            target_s = target_s[valid_agent]
+            valid_s = valid_s[valid_agent]
+
+            dist = torch.norm(modes_s - target_s.unsqueeze(2), dim=-1)  # (A, T, K)
+            valid_f = valid_s.float().unsqueeze(-1)
+            denom = valid_f.sum(dim=(0, 1)).clamp_min(1.0)
+            mode_sade = (dist * valid_f).sum(dim=(0, 1)) / denom
+
+            last_valid = valid_s.long().sum(dim=-1) - 1
+            agent_idx = torch.arange(valid_s.shape[0], device=device)
+            final_dist = dist[agent_idx, last_valid]  # (A, K)
+            mode_sfde = final_dist.mean(dim=0)
+
+            self.sum_min_sade += float(mode_sade.min())
+            self.sum_min_sfde += float(mode_sfde.min())
+            self.n_scenes += 1
+
+    def result(self) -> dict[str, Any]:
+        if self.n_scenes == 0:
+            return {"n_scenes": 0}
+        n = float(self.n_scenes)
+        min_sade = self.sum_min_sade / n
+        min_sfde = self.sum_min_sfde / n
+        return {
+            "n_scenes": int(self.n_scenes),
+            "min_sade": min_sade,
+            "min_sfde": min_sfde,
+            "joint_min_ade": min_sade,
+            "joint_min_fde": min_sfde,
+        }
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Scenario labels
 # ──────────────────────────────────────────────────────────────────────────────
@@ -351,6 +433,19 @@ def print_metrics(results: dict[str, Any]) -> None:
     extra = [(k, results[k]) for k in ("min_ade", "min_fde", "nll") if k in results]
     if extra:
         print("\n  " + "   ".join(f"{k}={v:.4f}" for k, v in extra))
+
+
+def print_scene_metrics(results: dict[str, Any]) -> None:
+    if int(results.get("n_scenes", 0)) <= 0 or "min_sade" not in results or "min_sfde" not in results:
+        return
+    c = 15
+    ws = [c, c, c]
+    print("\n====== Scene Metrics ======")
+    print(_sep(ws))
+    print(f"|{'n_scenes':^{c}}|{'minSADE':^{c}}|{'minSFDE':^{c}}|")
+    print(_sep(ws))
+    print(f"|{int(results['n_scenes']):^{c},}|{results['min_sade']:^{c}.4f}|{results['min_sfde']:^{c}.4f}|")
+    print(_sep(ws))
 
 
 def print_scenario_results(stats: dict[str, list], label_type: str) -> None:

@@ -88,6 +88,7 @@ class MultiAgentQCNetDataset(Dataset):
         data["agent"]["heading"] = heading
         data["agent"]["velocity"] = velocity
         data["agent"]["target"] = target
+        data["agent"]["attrs"] = torch.zeros(n, th, 2, dtype=torch.float32)
         data["agent"]["scored_index"] = torch.from_numpy(scored_local)
         self._add_pseudo_map(data)
         return data

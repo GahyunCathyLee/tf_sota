@@ -17,7 +17,9 @@ EXPERIMENT_ROOT = ADAPTER_DIR.parents[1]
 sys.path.insert(0, str(EXPERIMENT_ROOT))
 
 from adapters.common import dataset_dir, split_indices_path  # noqa: E402
+from adapters.multiagent_common import multiagent_indices, multiagent_split_dir  # noqa: E402
 from adapters.mtrpp.dataset import NeighFormerMTRDataset, build_intention_points_from_data, processed_root  # noqa: E402
+from adapters.mtrpp.multiagent_dataset import MultiAgentMTRDataset, build_intention_points_from_multiagent  # noqa: E402
 from adapters.mtrpp.train import (  # noqa: E402
     build_builder_kwargs,
     format_path_template,
@@ -31,9 +33,11 @@ from adapters.mtrpp.upstream import import_motion_transformer  # noqa: E402
 from adapters.mtp_go.metrics import (  # noqa: E402
     MetricAccumulator,
     SampleMetaLookup,
+    SceneMetricAccumulator,
     load_scenario_labels,
     print_latency,
     print_metrics,
+    print_scene_metrics,
     print_scenario_results,
 )
 
@@ -46,6 +50,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--batch-size", type=int)
     p.add_argument("--num-workers", type=int)
     p.add_argument("--device")
+    p.add_argument("--multiagent", action="store_true", help="Use data/{dataset}_multiagent/{split}_full arrays")
     p.add_argument("--scenario", action="store_true")
     p.add_argument("--scenario-labels", type=Path)
     p.add_argument("--max-samples", type=int)
@@ -83,6 +88,7 @@ def run_evaluate(model, loader, device, cfg: dict[str, Any], labels: SampleMetaL
 
     model.eval()
     acc = MetricAccumulator(dt=float(cfg.get("dt", 1.0 / float(cfg["eval_hz"]))), hz=float(cfg["eval_hz"]))
+    scene_acc = SceneMetricAccumulator()
     with torch.no_grad():
         for raw in loader:
             batch = move_batch_to_device(raw, device)
@@ -90,8 +96,10 @@ def run_evaluate(model, loader, device, cfg: dict[str, Any], labels: SampleMetaL
             pred, target, all_modes = prediction_tensors(out)
             sample_indices = raw["input_dict"]["sample_index"].detach().cpu().numpy().reshape(-1)
             label_rows = labels.lookup(sample_indices) if labels is not None and labels.enabled else None
-            acc.update(pred, target, all_modes=all_modes, labels=label_rows)
-    return acc
+            valid_mask = out["input_dict"]["center_gt_trajs_mask"].bool()
+            acc.update(pred, target, all_modes=all_modes, valid_mask=valid_mask, labels=label_rows)
+            scene_acc.update(all_modes, target, valid_mask, sample_indices)
+    return acc, scene_acc
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -112,7 +120,8 @@ def main(argv: list[str] | None = None) -> int:
     device = torch.device(args.device) if args.device else torch.device("cuda" if torch.cuda.is_available() else "cpu")
     data_root = resolve_path(args.data_root) if args.data_root else resolve_path(cfg["data_root"])
     cfg = {**cfg, "data_root": str(data_root)}
-    data_path = dataset_dir(data_root, cfg["dataset"])
+    use_multiagent = bool(args.multiagent or cfg.get("multiagent"))
+    data_path = multiagent_split_dir(data_root, cfg["dataset"], args.split).parent if use_multiagent else dataset_dir(data_root, cfg["dataset"])
     processed_dir = resolve_path(args.processed_dir) if args.processed_dir else resolve_path(cfg.get("processed_dir", "processed/mtrpp"))
     default_intention_file = processed_root(processed_dir, cfg["dataset"], cfg["feature_mode"]) / "intention_points.pkl"
     intention_file = Path(model_cfg.MOTION_DECODER.INTENTION_POINTS_FILE)
@@ -120,23 +129,38 @@ def main(argv: list[str] | None = None) -> int:
         intention_file = (EXPERIMENT_ROOT / intention_file).resolve()
     if not intention_file.exists():
         print(f"[WARN] intention points missing: {intention_file}; regenerating from train split.", flush=True)
-        train_indices = np.load(split_indices_path(data_root, cfg["dataset"], "train"))
         fallback_file = intention_file
         try:
-            build_intention_points_from_data(
-                data_path,
-                train_indices,
-                fallback_file,
-                num_modes=int(model_cfg.MOTION_DECODER.NUM_MOTION_MODES),
-            )
+            if use_multiagent:
+                build_intention_points_from_multiagent(
+                    multiagent_split_dir(data_root, cfg["dataset"], "train"),
+                    fallback_file,
+                    num_modes=int(model_cfg.MOTION_DECODER.NUM_MOTION_MODES),
+                )
+            else:
+                train_indices = np.load(split_indices_path(data_root, cfg["dataset"], "train"))
+                build_intention_points_from_data(
+                    data_path,
+                    train_indices,
+                    fallback_file,
+                    num_modes=int(model_cfg.MOTION_DECODER.NUM_MOTION_MODES),
+                )
         except OSError:
             fallback_file = default_intention_file
-            build_intention_points_from_data(
-                data_path,
-                train_indices,
-                fallback_file,
-                num_modes=int(model_cfg.MOTION_DECODER.NUM_MOTION_MODES),
-            )
+            if use_multiagent:
+                build_intention_points_from_multiagent(
+                    multiagent_split_dir(data_root, cfg["dataset"], "train"),
+                    fallback_file,
+                    num_modes=int(model_cfg.MOTION_DECODER.NUM_MOTION_MODES),
+                )
+            else:
+                train_indices = np.load(split_indices_path(data_root, cfg["dataset"], "train"))
+                build_intention_points_from_data(
+                    data_path,
+                    train_indices,
+                    fallback_file,
+                    num_modes=int(model_cfg.MOTION_DECODER.NUM_MOTION_MODES),
+                )
         model_cfg.MOTION_DECODER.INTENTION_POINTS_FILE = str(fallback_file)
         print(f"[INFO] intention points regenerated -> {fallback_file}", flush=True)
 
@@ -145,29 +169,37 @@ def main(argv: list[str] | None = None) -> int:
         global_attention_fallback=force_global,
     )
     mtr_global_cfg.ROOT_DIR = EXPERIMENT_ROOT
-    indices = np.load(split_indices_path(data_root, cfg["dataset"], args.split))
-    if args.max_samples is not None:
-        indices = indices[: args.max_samples]
+    if use_multiagent:
+        split_path = multiagent_split_dir(data_root, cfg["dataset"], args.split)
+        indices = multiagent_indices(split_path, args.max_samples)
+    else:
+        indices = np.load(split_indices_path(data_root, cfg["dataset"], args.split))
+        if args.max_samples is not None:
+            indices = indices[: args.max_samples]
     if args.batch_size is not None:
         cfg["batch_size"] = args.batch_size
     if args.num_workers is not None:
         cfg["num_workers"] = args.num_workers
-    ds = NeighFormerMTRDataset(
-        data_path,
-        indices,
-        cfg["dataset"],
-        cfg["feature_mode"],
-        args.split,
-        build_builder_kwargs(cfg),
-        processed_dir=processed_dir,
-        reuse_processed=bool(args.reuse_processed or cfg.get("reuse_processed", False)),
-    )
+    if use_multiagent:
+        ds = MultiAgentMTRDataset(split_path, cfg["dataset"], args.split, indices=indices, **build_builder_kwargs(cfg))
+    else:
+        ds = NeighFormerMTRDataset(
+            data_path,
+            indices,
+            cfg["dataset"],
+            cfg["feature_mode"],
+            args.split,
+            build_builder_kwargs(cfg),
+            processed_dir=processed_dir,
+            reuse_processed=bool(args.reuse_processed or cfg.get("reuse_processed", False)),
+        )
     loader = make_loader(ds, cfg, shuffle=False)
     model = MotionTransformer(config=model_cfg).to(device)
     model.load_state_dict(ckpt["model_state"])
     print(f"[INFO] Checkpoint : {ckpt_path}  (epoch {ckpt.get('epoch', '?')})")
     print(f"[INFO] Upstream   : {resolved_upstream}")
     print(f"[INFO] Dataset    : {args.split} split  n={len(ds):,}  {cfg['dataset']} {cfg['feature_mode']}")
+    print(f"[INFO] Source     : {'multiagent' if use_multiagent else 'single-agent'}")
     gpu = f"  ({torch.cuda.get_device_name(0)})" if device.type == "cuda" else ""
     print(f"[INFO] Device     : {device}{gpu}")
 
@@ -187,10 +219,12 @@ def main(argv: list[str] | None = None) -> int:
         labels_path = args.scenario_labels or (data_path / "scenario_labels.csv")
         labels = SampleMetaLookup(data_path, load_scenario_labels(resolve_path(labels_path)))
 
-    acc = run_evaluate(model, loader, device, cfg, labels)
+    acc, scene_acc = run_evaluate(model, loader, device, cfg, labels)
     results = acc.result()
+    results.update(scene_acc.result())
     print(f"\n  n_samples = {int(results['n_samples']):,}")
     print_metrics(results)
+    print_scene_metrics(results)
     if labels is not None and acc.has_scenario:
         print_scenario_results(acc.event_stats, "Event")
         print_scenario_results(acc.state_stats, "State")

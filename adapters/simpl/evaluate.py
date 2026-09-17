@@ -23,9 +23,11 @@ from adapters.multiagent_common import multiagent_indices, multiagent_split_dir 
 from adapters.mtp_go.metrics import (  # noqa: E402
     MetricAccumulator,
     SampleMetaLookup,
+    SceneMetricAccumulator,
     load_scenario_labels,
     print_latency,
     print_metrics,
+    print_scene_metrics,
     print_scenario_results,
 )
 from adapters.simpl.dataset import NeighFormerSIMPLDataset  # noqa: E402
@@ -102,6 +104,7 @@ class SceneIndexLookup:
 def run_evaluate(model, loader, device: torch.device, hz: float, labels: SampleMetaLookup | None):
     model.eval()
     acc = MetricAccumulator(dt=1.0 / hz, hz=hz)
+    scene_acc = SceneMetricAccumulator()
     for data in loader:
         out = model(model.pre_process(data))
         chosen, target, all_modes, valid_mask, scene_rows = flatten_simpl_targets(out, data, device)
@@ -111,7 +114,8 @@ def run_evaluate(model, loader, device: torch.device, hz: float, labels: SampleM
             scene_labels = labels.lookup(sample_indices)
             label_rows = [scene_labels[int(i)] if scene_labels is not None else None for i in scene_rows]
         acc.update(chosen, target, all_modes=all_modes, valid_mask=valid_mask, labels=label_rows)
-    return acc
+        scene_acc.update(all_modes, target, valid_mask, scene_rows)
+    return acc, scene_acc
 
 
 def measure_latency(fn, device: torch.device, warmup: int, iters: int) -> dict[str, float]:
@@ -259,10 +263,12 @@ def main(argv: list[str] | None = None) -> int:
             labels_path = args.scenario_labels or (data_path / "scenario_labels.csv")
             labels = SampleMetaLookup(data_path, load_scenario_labels(resolve_path(labels_path)))
 
-    acc = run_evaluate(model, loader, device, float(cfg.get("eval_hz", 3.0)), labels)
+    acc, scene_acc = run_evaluate(model, loader, device, float(cfg.get("eval_hz", 3.0)), labels)
     results = acc.result()
+    results.update(scene_acc.result())
     print(f"\n  n_samples = {int(results['n_samples']):,}")
     print_metrics(results)
+    print_scene_metrics(results)
     if labels is not None and acc.has_scenario:
         print_scenario_results(acc.event_stats, "Event")
         print_scenario_results(acc.state_stats, "State")

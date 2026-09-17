@@ -224,6 +224,58 @@ def set_matmul_precision(precision: str | None) -> None:
         torch.set_float32_matmul_precision(str(precision))
 
 
+def make_stdout_progress_callback(log_every_n_steps: int) -> Any:
+    import pytorch_lightning as pl
+
+    class StdoutProgressCallback(pl.Callback):
+        def __init__(self, every_n_steps: int) -> None:
+            self.every_n_steps = max(1, int(every_n_steps))
+
+        def on_train_epoch_start(self, trainer: Any, pl_module: Any) -> None:
+            total = trainer.num_training_batches
+            print(f"[TRAIN] epoch {trainer.current_epoch + 1}/{trainer.max_epochs} start  batches={total}", flush=True)
+
+        def on_train_batch_end(self, trainer: Any, pl_module: Any, outputs: Any, batch: Any, batch_idx: int) -> None:
+            step = batch_idx + 1
+            total = trainer.num_training_batches
+            should_print = step == 1 or step == total or step % self.every_n_steps == 0
+            if not should_print:
+                return
+            loss = None
+            if isinstance(outputs, dict):
+                loss = outputs.get("loss")
+            elif torch.is_tensor(outputs):
+                loss = outputs
+            loss_text = ""
+            if loss is not None:
+                try:
+                    loss_text = f" loss={float(loss.detach().cpu()):.4f}"
+                except (TypeError, ValueError):
+                    loss_text = ""
+            print(
+                f"[TRAIN] epoch {trainer.current_epoch + 1}/{trainer.max_epochs} "
+                f"step {step}/{total} global_step={trainer.global_step}{loss_text}",
+                flush=True,
+            )
+
+        def on_validation_epoch_start(self, trainer: Any, pl_module: Any) -> None:
+            print(f"[VAL] epoch {trainer.current_epoch + 1}/{trainer.max_epochs} start", flush=True)
+
+        def on_validation_epoch_end(self, trainer: Any, pl_module: Any) -> None:
+            metrics = []
+            for name in ("val_minADE", "val_minFDE", "val_MR"):
+                value = trainer.callback_metrics.get(name)
+                if value is not None:
+                    try:
+                        metrics.append(f"{name}={float(value.detach().cpu()):.4f}")
+                    except (TypeError, ValueError):
+                        pass
+            suffix = "  " + " ".join(metrics) if metrics else ""
+            print(f"[VAL] epoch {trainer.current_epoch + 1}/{trainer.max_epochs} done{suffix}", flush=True)
+
+    return StdoutProgressCallback(log_every_n_steps)
+
+
 def subset_indices(indices: np.ndarray, limit: int | None) -> np.ndarray:
     return indices if limit is None else indices[: int(limit)]
 
@@ -277,6 +329,7 @@ def write_adapter_checkpoint(src_ckpt: Path, dst: Path, cfg: dict[str, Any], mod
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     cfg = apply_cli(load_config(args.config), args)
+    print(f"[INIT] HiVT config loaded: {args.config}  mode={cfg['mode']}", flush=True)
     set_seed(int(cfg["seed"]))
     set_matmul_precision(cfg.get("matmul_precision"))
 
@@ -285,6 +338,7 @@ def main(argv: list[str] | None = None) -> int:
     data_path = dataset_dir(data_root, cfg["dataset"])
     lane_cache_root = format_path_template(cfg["lane_cache_root"], cfg) if cfg.get("lane_cache_root") else None
 
+    print(f"[DATA] preparing {cfg['dataset']} {cfg['feature_mode']} from {data_root}", flush=True)
     if cfg.get("multiagent"):
         train_path = multiagent_split_dir(data_root, cfg["dataset"], "train")
         val_path = multiagent_split_dir(data_root, cfg["dataset"], "val")
@@ -327,6 +381,7 @@ def main(argv: list[str] | None = None) -> int:
             lane_max_segments=cfg["lane_max_segments"],
         )
 
+    print(f"[DATA] ready: train={len(train_ds):,} val={len(val_ds):,}", flush=True)
     output_dir = format_path_template(cfg["output_dir"], cfg)
     ckpt_dir = format_path_template(cfg["ckpt_dir"], cfg) / cfg["exp_tag"]
     tb_dir = format_path_template(cfg["tensorboard_dir"], cfg) / cfg["exp_tag"]
@@ -347,6 +402,7 @@ def main(argv: list[str] | None = None) -> int:
     except ImportError as exc:
         raise SystemExit("HiVT dependencies are missing: pytorch_lightning and torch_geometric are required.") from exc
 
+    print(f"[UPSTREAM] loading HiVT from {cfg['upstream_dir']}", flush=True)
     upstream_dir = add_upstream_to_path(cfg["upstream_dir"])
     from models.hivt import HiVT  # noqa: WPS433
 
@@ -358,13 +414,16 @@ def main(argv: list[str] | None = None) -> int:
     }
     train_loader = DataLoader(train_ds, shuffle=True, drop_last=True, **loader_kwargs)
     val_loader = DataLoader(val_ds, shuffle=False, drop_last=False, **loader_kwargs)
+    print(f"[LOADER] train_batches={len(train_loader):,} val_batches={len(val_loader):,}", flush=True)
 
     model_args = build_model_args(cfg, train_ds)
+    print("[MODEL] building HiVT", flush=True)
     model = HiVT(**model_args)
     callbacks = [
         ModelCheckpoint(dirpath=str(ckpt_dir), filename="lightning-best", monitor="val_minFDE", mode="min",
                         save_top_k=1, save_last=True),
         LearningRateMonitor(logging_interval="epoch"),
+        make_stdout_progress_callback(int(cfg["log_every_n_steps"])),
     ]
     trainer = pl.Trainer(
         accelerator=str(cfg["accelerator"]),
