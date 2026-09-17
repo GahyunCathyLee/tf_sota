@@ -116,6 +116,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--seed", type=int)
     p.add_argument("--device")
     p.add_argument("--lr", type=float)
+    p.add_argument("--log-interval", type=int)
     p.add_argument("--max-train-samples", type=int)
     p.add_argument("--max-eval-samples", type=int)
     p.add_argument("--upstream-dir", type=Path)
@@ -240,6 +241,7 @@ def apply_cli(cfg: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]:
         ("seed", "seed"),
         ("device", "device"),
         ("lr", "lr"),
+        ("log_interval", "log_interval"),
         ("max_train_samples", "max_train_samples"),
         ("max_eval_samples", "max_eval_samples"),
         ("upstream_dir", "upstream_dir"),
@@ -412,8 +414,14 @@ def make_loader(ds: NeighFormerMTRDataset, cfg: dict[str, Any], shuffle: bool):
 
 
 def main(argv: list[str] | None = None) -> int:
+    run_start = time.perf_counter()
+
+    def progress(message: str) -> None:
+        print(f"[MTR++] {message} elapsed={(time.perf_counter() - run_start) / 60.0:.1f}m", flush=True)
+
     args = parse_args(argv)
     cfg = apply_cli(load_config(args.config), args)
+    progress(f"config loaded: {args.config} mode={cfg['mode']}")
     set_seed(int(cfg["seed"]))
 
     data_root = resolve_path(cfg["data_root"])
@@ -421,8 +429,10 @@ def main(argv: list[str] | None = None) -> int:
     builder_kwargs = build_builder_kwargs(cfg)
     processed_dir = resolve_path(cfg["processed_dir"])
     out_root = processed_root(processed_dir, cfg["dataset"], cfg["feature_mode"])
+    progress(f"paths resolved: data_root={data_root} processed={out_root}")
 
     if cfg.get("multiagent"):
+        progress("loading multiagent split indices")
         train_path = multiagent_split_dir(data_root, cfg["dataset"], "train")
         val_path = multiagent_split_dir(data_root, cfg["dataset"], "val")
         data_path = train_path.parent
@@ -433,15 +443,19 @@ def main(argv: list[str] | None = None) -> int:
         if cfg.get("reuse_processed"):
             raise SystemExit("MTR++ --reuse-processed is only implemented for single-agent arrays.")
     else:
+        progress("loading split indices")
         data_path = dataset_dir(data_root, cfg["dataset"])
         train_path = data_path
         val_path = data_path
         train_idx = subset_indices(np.load(split_indices_path(data_root, cfg["dataset"], "train")), cfg.get("max_train_samples"))
         val_idx = subset_indices(np.load(split_indices_path(data_root, cfg["dataset"], "val")), cfg.get("max_eval_samples"))
+    progress(f"indices ready: train={len(train_idx):,} val={len(val_idx):,}")
 
     if cfg["mode"] == "preprocess":
+        progress("preprocess mode: building sample dataset")
         builder = NeighFormerMTRDataset(data_path, train_idx[:1], cfg["dataset"], cfg["feature_mode"], "train", builder_kwargs).builder
         report = {"processed_root": str(out_root), "splits": {}}
+        progress("preprocess mode: building intention points")
         build_intention_points_from_data(
             data_path,
             np.load(split_indices_path(data_root, cfg["dataset"], "train")),
@@ -449,6 +463,7 @@ def main(argv: list[str] | None = None) -> int:
             num_modes=int((cfg.get("model_hparams") or {}).get("num_motion_modes", 6)),
         )
         for split in cfg.get("preprocess_splits", ["train", "val", "test"]):
+            progress(f"preprocess mode: writing {split} split")
             indices = np.load(split_indices_path(data_root, cfg["dataset"], split))
             if split == "train" and cfg.get("max_train_samples") is not None:
                 indices = indices[: int(cfg["max_train_samples"])]
@@ -467,9 +482,12 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if cfg.get("multiagent"):
+        progress("building train dataset")
         train_ds = MultiAgentMTRDataset(train_path, cfg["dataset"], "train", indices=train_idx, **builder_kwargs)
+        progress("building val dataset")
         val_ds = MultiAgentMTRDataset(val_path, cfg["dataset"], "val", indices=val_idx, **builder_kwargs)
     else:
+        progress("building train dataset")
         train_ds = NeighFormerMTRDataset(
             data_path,
             train_idx,
@@ -480,6 +498,7 @@ def main(argv: list[str] | None = None) -> int:
             processed_dir=processed_dir,
             reuse_processed=bool(cfg["reuse_processed"]),
         )
+        progress("building val dataset")
         val_ds = NeighFormerMTRDataset(
             data_path,
             val_idx,
@@ -490,6 +509,7 @@ def main(argv: list[str] | None = None) -> int:
             processed_dir=processed_dir,
             reuse_processed=bool(cfg["reuse_processed"]),
         )
+    progress(f"datasets ready: train={len(train_ds):,} val={len(val_ds):,}")
 
     output_dir = format_path_template(cfg["output_dir"], cfg)
     ckpt_dir = format_path_template(cfg["ckpt_dir"], cfg) / cfg["exp_tag"]
@@ -497,10 +517,12 @@ def main(argv: list[str] | None = None) -> int:
     ckpt_dir.mkdir(parents=True, exist_ok=True)
     data_report = {"train": train_ds.describe(), "val": val_ds.describe(), "channels": train_ds.channel_stats()}
     (output_dir / "data_report.json").write_text(json.dumps(data_report, indent=2), encoding="utf-8")
+    progress(f"data report written: {output_dir / 'data_report.json'}")
     if cfg["mode"] == "check-data":
         print(json.dumps(data_report, indent=2))
         return 0
 
+    progress("importing torch and upstream MTR++")
     try:
         import torch
     except ImportError as exc:
@@ -511,6 +533,7 @@ def main(argv: list[str] | None = None) -> int:
         cfg["upstream_dir"],
         global_attention_fallback=force_global,
     )
+    progress(f"upstream imported: {upstream_dir}")
     requested_device = str(cfg["device"]).lower()
     use_cuda = requested_device in {"auto", "gpu", "cuda"} and torch.cuda.is_available()
     device = torch.device("cuda" if use_cuda else "cpu")
@@ -526,20 +549,24 @@ def main(argv: list[str] | None = None) -> int:
         )
     intention_file = out_root / "intention_points.pkl"
     if cfg.get("multiagent"):
+        progress(f"building intention points: {intention_file}")
         build_intention_points_from_multiagent(
             train_path,
             intention_file,
             num_modes=int((cfg.get("model_hparams") or {}).get("num_motion_modes", 6)),
         )
     else:
+        progress(f"building intention points: {intention_file}")
         build_intention_points_from_data(
             data_path,
             np.load(split_indices_path(data_root, cfg["dataset"], "train")),
             intention_file,
             num_modes=int((cfg.get("model_hparams") or {}).get("num_motion_modes", 6)),
         )
+    progress("intention points ready")
     model_cfg = build_model_config(cfg, train_ds, intention_file)
     mtr_global_cfg.ROOT_DIR = EXPERIMENT_ROOT
+    progress("building model")
     model = MotionTransformer(config=model_cfg).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=float(cfg["lr"]), weight_decay=float(cfg["weight_decay"]))
     start_epoch = 0
@@ -550,9 +577,12 @@ def main(argv: list[str] | None = None) -> int:
         if ckpt.get("optimizer_state"):
             optimizer.load_state_dict(ckpt["optimizer_state"])
         start_epoch = int(ckpt.get("epoch", 0))
+        progress(f"resumed from {resume} at epoch={start_epoch}")
 
+    progress("building dataloaders")
     train_loader = make_loader(train_ds, cfg, shuffle=True)
     val_loader = make_loader(val_ds, cfg, shuffle=False)
+    progress(f"dataloaders ready: train_batches={len(train_loader):,} val_batches={len(val_loader):,}")
     best_fde = float("inf")
     print("====== MTR++ Train ======", flush=True)
     print(f"upstream : {upstream_dir} ({upstream_commit(upstream_dir)})", flush=True)
@@ -571,6 +601,8 @@ def main(argv: list[str] | None = None) -> int:
         total_loss = 0.0
         batches = 0
         epoch_start = time.perf_counter()
+        log_interval = max(1, int(cfg["log_interval"]))
+        print(f"epoch={epoch + 1}/{cfg['epochs']} start elapsed=0.0m", flush=True)
         for it, batch in enumerate(train_loader, start=1):
             batch = move_batch_to_device(batch, device)
             optimizer.zero_grad(set_to_none=True)
@@ -580,7 +612,7 @@ def main(argv: list[str] | None = None) -> int:
             optimizer.step()
             total_loss += float(loss.detach())
             batches += 1
-            if it == 1 or it % int(cfg["log_interval"]) == 0 or it == len(train_loader):
+            if it == 1 or it % log_interval == 0 or it == len(train_loader):
                 print(
                     f"epoch={epoch + 1}/{cfg['epochs']} iter={it}/{len(train_loader)} "
                     f"loss={float(loss.detach()):.4f} "
