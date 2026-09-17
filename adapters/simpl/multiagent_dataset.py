@@ -78,7 +78,7 @@ class MultiAgentSIMPLDataset(Dataset):
             if bool(valid.any()):
                 trajs_fut[i, valid] = NeighFormerSIMPLDataset._to_actor_local(y[src, valid, 0:2], centers[i], vecs[i])
 
-        lane_graph = self._lane_graph(scene_idx, arrays)
+        lane_graph = self._ensure_min_lanes(self._lane_graph(scene_idx, arrays))
         scene_ctrs = torch.cat([torch.from_numpy(centers), torch.from_numpy(lane_graph["lane_ctrs"])], dim=0)
         scene_vecs = torch.cat([torch.from_numpy(vecs), torch.from_numpy(lane_graph["lane_vecs"])], dim=0)
         rpe = build_rpe(scene_ctrs, scene_vecs)
@@ -102,6 +102,21 @@ class MultiAgentSIMPLDataset(Dataset):
 
     def _pseudo_lane_graph(self) -> dict[str, np.ndarray | int]:
         return empty_graph(self.lane_half_length)
+
+    @staticmethod
+    def _ensure_min_lanes(graph: dict[str, np.ndarray | int]) -> dict[str, np.ndarray | int]:
+        """Avoid upstream SIMPL LaneNet squeeze() collapsing a single lane to 1D."""
+        if int(graph.get("num_lanes", 0)) != 1:
+            return graph
+        out: dict[str, np.ndarray | int] = {}
+        lane_axis_keys = {"node_ctrs", "node_vecs", "turn", "control", "intersect", "left", "right", "lane_ctrs", "lane_vecs"}
+        for key, value in graph.items():
+            if key in lane_axis_keys and isinstance(value, np.ndarray) and value.shape[0] == 1:
+                out[key] = np.concatenate([value, value.copy()], axis=0)
+            else:
+                out[key] = value
+        out["num_lanes"] = 2
+        return out
 
     def _warn_lane_cache_once(self, message: str) -> None:
         if not self._warned_lane_cache:
