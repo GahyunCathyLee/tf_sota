@@ -19,6 +19,7 @@ EXPERIMENT_ROOT = ADAPTER_DIR.parents[1]
 sys.path.insert(0, str(EXPERIMENT_ROOT))
 
 from adapters.common import dataset_dir, print_hparam_summary, split_indices_path  # noqa: E402
+from adapters.multiagent_common import multiagent_indices, multiagent_split_dir  # noqa: E402
 from adapters.mtp_go.metrics import (  # noqa: E402
     MetricAccumulator,
     SampleMetaLookup,
@@ -28,6 +29,7 @@ from adapters.mtp_go.metrics import (  # noqa: E402
     print_scenario_results,
 )
 from adapters.simpl.dataset import NeighFormerSIMPLDataset  # noqa: E402
+from adapters.simpl.multiagent_dataset import MultiAgentSIMPLDataset  # noqa: E402
 from adapters.simpl.train import flatten_simpl_targets, resolve_path, trainable_parameter_count  # noqa: E402
 from adapters.simpl.upstream import add_upstream_to_path  # noqa: E402
 
@@ -40,6 +42,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--batch-size", type=int)
     p.add_argument("--num-workers", type=int)
     p.add_argument("--device")
+    p.add_argument("--multiagent", action="store_true", help="Use data/{dataset}_multiagent/{split}_full arrays")
     p.add_argument("--scenario", action="store_true")
     p.add_argument("--scenario-labels", type=Path)
     p.add_argument("--max-samples", type=int)
@@ -52,6 +55,47 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--upstream-dir", type=Path)
     p.add_argument("--output-json", type=Path)
     return p.parse_args(argv)
+
+
+def load_multiagent_scene_labels(path: Path) -> dict[int, dict[str, str]] | None:
+    """scenario_labels_scene.csv -> {scene_index: {event_label, state_label}}."""
+    import pandas as pd
+
+    path = Path(path)
+    if not path.exists():
+        print(f"[WARN] scenario_labels_scene not found: {path} -> scenario breakdown disabled")
+        return None
+    df = pd.read_csv(path)
+    if "scene_index" not in df.columns:
+        print("[WARN] scenario_labels_scene missing scene_index -> disabled")
+        return None
+    event_col = "scene_event_label" if "scene_event_label" in df.columns else "event_label"
+    if event_col not in df.columns:
+        print("[WARN] scenario_labels_scene has no scene_event_label/event_label -> disabled")
+        return None
+    out: dict[int, dict[str, str]] = {}
+    for row in df.itertuples(index=False):
+        out[int(getattr(row, "scene_index"))] = {
+            "event_label": str(getattr(row, event_col)),
+            "state_label": "multiagent",
+        }
+    return out
+
+
+class SceneIndexLookup:
+    """scene index -> scene-level scenario label for multi-agent splits."""
+
+    def __init__(self, labels_lut: dict[int, dict[str, str]] | None) -> None:
+        self.labels_lut = labels_lut
+
+    @property
+    def enabled(self) -> bool:
+        return self.labels_lut is not None
+
+    def lookup(self, sample_indices: np.ndarray) -> list[dict[str, str] | None] | None:
+        if not self.enabled:
+            return None
+        return [self.labels_lut.get(int(i)) for i in np.asarray(sample_indices, dtype=np.int64).reshape(-1)]
 
 
 @torch.no_grad()
@@ -113,27 +157,43 @@ def main(argv: list[str] | None = None) -> int:
     if args.data_root:
         cfg = dict(cfg)
         cfg["data_root"] = str(args.data_root)
+    use_multiagent = bool(args.multiagent or cfg.get("multiagent"))
     data_root = resolve_path(cfg["data_root"])
-    data_path = dataset_dir(data_root, cfg["dataset"])
     lane_cache_value = args.lane_cache_root or cfg.get("lane_cache_root")
     lane_cache_root = resolve_path(str(lane_cache_value).format(**cfg)) if lane_cache_value else None
     lane_cache_exists = bool(lane_cache_root and lane_cache_root.exists())
-    indices = np.load(split_indices_path(data_root, cfg["dataset"], args.split))
-    if args.max_samples is not None:
-        indices = indices[: args.max_samples]
-    ds = NeighFormerSIMPLDataset(
-        data_path,
-        indices,
-        cfg["dataset"],
-        cfg["feature_mode"],
-        args.split,
-        cfg["lane_half_length"],
-        lane_cache_root=lane_cache_root,
-        lane_radius=args.lane_radius if args.lane_radius is not None else cfg.get("lane_radius", 120.0),
-        lane_max_segments=args.lane_max_segments
-        if args.lane_max_segments is not None
-        else cfg.get("lane_max_segments", 192),
-    )
+    lane_radius = args.lane_radius if args.lane_radius is not None else cfg.get("lane_radius", 120.0)
+    lane_max_segments = args.lane_max_segments if args.lane_max_segments is not None else cfg.get("lane_max_segments", 192)
+    if use_multiagent:
+        split_path = multiagent_split_dir(data_root, cfg["dataset"], args.split)
+        indices = multiagent_indices(split_path, args.max_samples)
+        ds = MultiAgentSIMPLDataset(
+            split_path,
+            cfg["dataset"],
+            args.split,
+            indices=indices,
+            lane_half_length=cfg["lane_half_length"],
+            lane_cache_root=lane_cache_root if lane_cache_exists else None,
+            lane_radius=lane_radius,
+            lane_max_segments=lane_max_segments,
+        )
+        data_path = split_path
+    else:
+        data_path = dataset_dir(data_root, cfg["dataset"])
+        indices = np.load(split_indices_path(data_root, cfg["dataset"], args.split))
+        if args.max_samples is not None:
+            indices = indices[: args.max_samples]
+        ds = NeighFormerSIMPLDataset(
+            data_path,
+            indices,
+            cfg["dataset"],
+            cfg["feature_mode"],
+            args.split,
+            cfg["lane_half_length"],
+            lane_cache_root=lane_cache_root,
+            lane_radius=lane_radius,
+            lane_max_segments=lane_max_segments,
+        )
     batch_size = args.batch_size or int(cfg["batch_size"])
     num_workers = args.num_workers if args.num_workers is not None else int(cfg["num_workers"])
     loader = DataLoader(ds, batch_size=batch_size, shuffle=False, num_workers=num_workers,
@@ -144,6 +204,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"[INFO] Checkpoint : {ckpt_path}  (epoch {ckpt.get('epoch', '?')})")
     print(f"[INFO] Upstream   : {upstream_dir}")
     print(f"[INFO] Dataset    : {args.split} split  n={len(ds):,}  {cfg['dataset']} {cfg['feature_mode']}")
+    print(f"[INFO] Source     : {'multiagent' if use_multiagent else 'single-agent'}")
     print(f"[INFO] Lanes      : {lane_cache_root if lane_cache_root else 'pseudo fallback'}")
     print(f"[INFO] Lane cache : exists={lane_cache_exists}  source={'cached lanes' if lane_cache_exists else 'pseudo fallback'}")
     gpu = f"  ({torch.cuda.get_device_name(0)})" if device.type == "cuda" else ""
@@ -154,7 +215,7 @@ def main(argv: list[str] | None = None) -> int:
             ("adapter", "SIMPL"),
             ("dataset", cfg.get("dataset")),
             ("feature_mode", cfg.get("feature_mode")),
-            ("eval_scope", "ego+neighbors" if ds.has_neighbor_future else "ego_only"),
+            ("eval_scope", "multiagent_scene" if use_multiagent else ("ego+neighbors" if ds.has_neighbor_future else "ego_only")),
             ("checkpoint_epoch", ckpt.get("epoch")),
             ("epochs", cfg.get("epochs")),
             ("batch_size", cfg.get("batch_size")),
@@ -191,8 +252,12 @@ def main(argv: list[str] | None = None) -> int:
 
     labels = None
     if args.scenario:
-        labels_path = args.scenario_labels or (data_path / "scenario_labels.csv")
-        labels = SampleMetaLookup(data_path, load_scenario_labels(resolve_path(labels_path)))
+        if use_multiagent:
+            labels_path = args.scenario_labels or (data_path / "scenario_labels_scene.csv")
+            labels = SceneIndexLookup(load_multiagent_scene_labels(resolve_path(labels_path)))
+        else:
+            labels_path = args.scenario_labels or (data_path / "scenario_labels.csv")
+            labels = SampleMetaLookup(data_path, load_scenario_labels(resolve_path(labels_path)))
 
     acc = run_evaluate(model, loader, device, float(cfg.get("eval_hz", 3.0)), labels)
     results = acc.result()
