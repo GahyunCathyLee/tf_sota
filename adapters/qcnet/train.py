@@ -8,7 +8,6 @@ import json
 import random
 import shutil
 import sys
-import time
 from pathlib import Path
 from typing import Any
 
@@ -204,60 +203,6 @@ def make_progress_bar(train_loader: Any) -> Any:
     return TrainOnlyProgressBar(refresh_rate=max(1, len(train_loader) // 10))
 
 
-def make_stdout_progress_callback(train_loader: Any) -> Any:
-    import pytorch_lightning as pl
-
-    class StdoutProgressCallback(pl.Callback):
-        def __init__(self) -> None:
-            self.epoch_start = time.perf_counter()
-            self.every_n_steps = max(1, len(train_loader) // 10)
-
-        def on_train_epoch_start(self, trainer: Any, pl_module: Any) -> None:
-            self.epoch_start = time.perf_counter()
-            print(
-                f"[TRAIN] epoch {trainer.current_epoch + 1}/{trainer.max_epochs} start "
-                f"batches={trainer.num_training_batches} elapsed=0.0m",
-                flush=True,
-            )
-
-        def on_train_batch_end(self, trainer: Any, pl_module: Any, outputs: Any, batch: Any, batch_idx: int) -> None:
-            step = batch_idx + 1
-            total = trainer.num_training_batches
-            if step != 1 and step != total and step % self.every_n_steps != 0:
-                return
-            print(
-                f"[TRAIN] epoch {trainer.current_epoch + 1}/{trainer.max_epochs} "
-                f"step {step}/{total} global_step={trainer.global_step} "
-                f"elapsed={(time.perf_counter() - self.epoch_start) / 60.0:.1f}m",
-                flush=True,
-            )
-
-        def on_validation_epoch_start(self, trainer: Any, pl_module: Any) -> None:
-            print(
-                f"[VAL] epoch {trainer.current_epoch + 1}/{trainer.max_epochs} start "
-                f"elapsed={(time.perf_counter() - self.epoch_start) / 60.0:.1f}m",
-                flush=True,
-            )
-
-        def on_validation_epoch_end(self, trainer: Any, pl_module: Any) -> None:
-            metrics = []
-            for name in ("val_minADE", "val_minFDE", "val_MR"):
-                value = trainer.callback_metrics.get(name)
-                if value is not None:
-                    try:
-                        metrics.append(f"{name}={float(value.detach().cpu()):.4f}")
-                    except (TypeError, ValueError):
-                        pass
-            suffix = "  " + " ".join(metrics) if metrics else ""
-            print(
-                f"[VAL] epoch {trainer.current_epoch + 1}/{trainer.max_epochs} done{suffix} "
-                f"elapsed={(time.perf_counter() - self.epoch_start) / 60.0:.1f}m",
-                flush=True,
-            )
-
-    return StdoutProgressCallback()
-
-
 def subset_indices(indices: np.ndarray, limit: int | None) -> np.ndarray:
     return indices if limit is None else indices[: int(limit)]
 
@@ -415,7 +360,6 @@ def main(argv: list[str] | None = None) -> int:
                         save_top_k=1, save_last=True),
         LearningRateMonitor(logging_interval="epoch"),
         make_progress_bar(train_loader),
-        make_stdout_progress_callback(train_loader),
     ]
     trainer = pl.Trainer(
         accelerator=str(cfg["accelerator"]),

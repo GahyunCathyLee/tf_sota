@@ -602,7 +602,14 @@ def main(argv: list[str] | None = None) -> int:
     print(f"upstream : {upstream_dir} ({upstream_commit(upstream_dir)})", flush=True)
     print(f"data     : {data_path}", flush=True)
     print(f"source   : {'multiagent' if cfg.get('multiagent') else 'single-agent dimI'}", flush=True)
-    print(f"samples  : train={len(train_ds):,} val={len(val_ds):,}", flush=True)
+    if cfg.get("multiagent"):
+        print(
+            f"samples  : train_targets={len(train_ds):,} val_targets={len(val_ds):,} "
+            f"source_scenes train={len(train_idx):,} val={len(val_idx):,}",
+            flush=True,
+        )
+    else:
+        print(f"samples  : train={len(train_ds):,} val={len(val_ds):,}", flush=True)
     print(f"mode     : {cfg['mode']}  epochs={cfg['epochs']}  batch_size={cfg['batch_size']}", flush=True)
     print(
         f"device   : {device}  cuda_op_stubs={using_cuda_op_stubs()} "
