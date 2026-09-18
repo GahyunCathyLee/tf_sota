@@ -16,14 +16,16 @@ from modules.qcnet_agent_encoder import QCNetAgentEncoder
 from predictors import QCNet
 from utils import angle_between_2d_vectors, weight_init, wrap_angle
 
+from adapters.common import feature_mode_names
+
 
 class QCNetAgentEncoderWithAttrs(QCNetAgentEncoder):
     """Official QCNet agent encoder with optional continuous agent attrs.
 
     The base encoder embeds four continuous features per agent-time token:
     displacement norm, displacement angle, velocity norm, velocity angle. For
-    ``dimI`` runs the dataset supplies ``agent.attrs[..., [dim, I]]`` and this
-    encoder appends them before the Fourier embedding.
+    Feature modes with side channels supply ``agent.attrs`` and this encoder
+    appends them before the Fourier embedding.
     """
 
     def __init__(
@@ -191,7 +193,7 @@ class QCNetAgentEncoderWithAttrs(QCNetAgentEncoder):
 
 def build_qcnet(model_args: dict, feature_mode: str) -> QCNet:
     model = QCNet(**model_args)
-    extra_dim = 2 if feature_mode == "dimI" else 0
+    extra_dim = max(0, len(feature_mode_names(feature_mode)) - 6)
     if extra_dim:
         model.encoder.agent_encoder = QCNetAgentEncoderWithAttrs(
             dataset=model.dataset,

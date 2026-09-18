@@ -55,6 +55,7 @@ class NeighFormerQCNetDataset(Dataset):
         self.lane_max_segments = int(lane_max_segments)
         self.nb_feature_indices = np.asarray(feature_mode_indices(feature_mode), dtype=np.int64)
         self.nb_feature_names = feature_mode_names(feature_mode)
+        self.extra_feature_indices = self.nb_feature_indices[6:]
         self._arrays: dict[str, np.ndarray] | None = None
         self._recording_cache: dict[int, dict[str, Any] | None] = {}
         self._warned_lane_cache = False
@@ -116,8 +117,8 @@ class NeighFormerQCNetDataset(Dataset):
         valid_mask = torch.zeros(num_agents, th + tf, dtype=torch.bool)
         predict_mask = torch.zeros(num_agents, th + tf, dtype=torch.bool)
         attrs = None
-        if self.feature_mode == "dimI":
-            attrs = torch.full((num_agents, th, 2), -1.0, dtype=torch.float32)
+        if self.extra_feature_indices.size:
+            attrs = torch.full((num_agents, th, int(self.extra_feature_indices.size)), -1.0, dtype=torch.float32)
 
         position[0, :th] = torch.from_numpy(ego[:, 0:2])
         velocity[0, :th] = torch.from_numpy(ego[:, 2:4])
@@ -139,7 +140,7 @@ class NeighFormerQCNetDataset(Dataset):
             velocity[agent_offset, :th] = torch.from_numpy(ego[:, 2:4] + nb_hist[:, 2:4])
             valid_mask[agent_offset, :th] = torch.from_numpy(slot_mask)
             if attrs is not None:
-                attrs[agent_offset] = torch.from_numpy(nb_hist[:, [8, 9]])
+                attrs[agent_offset] = torch.from_numpy(nb_hist[:, self.extra_feature_indices])
 
         heading = _heading_from_velocity(velocity)
         target = torch.zeros(num_agents, tf, 4, dtype=torch.float32)
@@ -350,5 +351,5 @@ class NeighFormerQCNetDataset(Dataset):
             "lane_cache_root": str(self.lane_cache_root) if self.lane_cache_root else None,
             "lane_radius": self.lane_radius,
             "lane_max_segments": self.lane_max_segments,
-            "agent_attr_dim": 2 if self.feature_mode == "dimI" else 0,
+            "agent_attr_dim": int(self.extra_feature_indices.size),
         }

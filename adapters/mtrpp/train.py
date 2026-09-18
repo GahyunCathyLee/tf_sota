@@ -17,7 +17,7 @@ ADAPTER_DIR = Path(__file__).resolve().parent
 EXPERIMENT_ROOT = ADAPTER_DIR.parents[1]
 sys.path.insert(0, str(EXPERIMENT_ROOT))
 
-from adapters.common import dataset_dir, split_indices_path  # noqa: E402
+from adapters.common import FEATURE_MODES, dataset_dir, split_indices_path  # noqa: E402
 from adapters.multiagent_common import multiagent_indices, multiagent_split_dir  # noqa: E402
 from adapters.mtrpp.dataset import (  # noqa: E402
     NeighFormerMTRDataset,
@@ -103,7 +103,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--config", required=True, type=Path)
     p.add_argument("--mode", default="full", choices=["smoke", "full", "check-data", "preprocess"])
     p.add_argument("--dataset", choices=["highD", "exiD"])
-    p.add_argument("--feature-mode", choices=["baseline", "dimI"])
+    p.add_argument("--feature-mode", choices=sorted(FEATURE_MODES))
     p.add_argument("--data-root", type=Path)
     p.add_argument("--ckpt-dir", type=Path)
     p.add_argument("--output-dir", type=Path)
@@ -260,7 +260,7 @@ def apply_cli(cfg: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]:
     if not cfg["dataset"] or not cfg["feature_mode"]:
         raise SystemExit("dataset and feature_mode must be set by config or CLI")
     if not cfg["exp_tag"]:
-        cfg["exp_tag"] = f"{cfg['dataset']}{1 if cfg['feature_mode'] == 'dimI' else 0}"
+        cfg["exp_tag"] = f"{cfg['dataset']}_{cfg['feature_mode']}"
     cfg["mode"] = mode
     return cfg
 
@@ -601,7 +601,7 @@ def main(argv: list[str] | None = None) -> int:
     print("====== MTR++ Train ======", flush=True)
     print(f"upstream : {upstream_dir} ({upstream_commit(upstream_dir)})", flush=True)
     print(f"data     : {data_path}", flush=True)
-    print(f"source   : {'multiagent' if cfg.get('multiagent') else 'single-agent dimI'}", flush=True)
+    print(f"source   : {'multiagent' if cfg.get('multiagent') else 'single-agent canonical'}", flush=True)
     if cfg.get("multiagent"):
         print(
             f"samples  : train_targets={len(train_ds):,} val_targets={len(val_ds):,} "

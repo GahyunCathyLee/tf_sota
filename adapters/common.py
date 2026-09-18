@@ -17,6 +17,10 @@ FEATURE_MODES = {
         "neighbor_indices": [0, 1, 2, 3, 4, 5],
         "neighbor_names": ["dx", "dy", "dvx", "dvy", "dax", "day"],
     },
+    "I": {
+        "neighbor_indices": [0, 1, 2, 3, 4, 5, 9],
+        "neighbor_names": ["dx", "dy", "dvx", "dvy", "dax", "day", "I"],
+    },
     "dimI": {
         "neighbor_indices": [0, 1, 2, 3, 4, 5, 8, 9],
         "neighbor_names": ["dx", "dy", "dvx", "dvy", "dax", "day", "dim", "I"],

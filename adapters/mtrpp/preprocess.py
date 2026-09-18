@@ -15,7 +15,7 @@ ADAPTER_DIR = Path(__file__).resolve().parent
 EXPERIMENT_ROOT = ADAPTER_DIR.parents[1]
 sys.path.insert(0, str(EXPERIMENT_ROOT))
 
-from adapters.common import dataset_dir, split_indices_path  # noqa: E402
+from adapters.common import FEATURE_MODES, dataset_dir, split_indices_path  # noqa: E402
 from adapters.mtrpp.dataset import (  # noqa: E402
     NeighFormerMTRBuilder,
     build_intention_points_from_data,
@@ -27,7 +27,7 @@ from adapters.mtrpp.dataset import (  # noqa: E402
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--dataset", required=True, choices=["highD", "exiD"])
-    p.add_argument("--feature-mode", required=True, choices=["baseline", "dimI"])
+    p.add_argument("--feature-mode", required=True, choices=sorted(FEATURE_MODES))
     p.add_argument("--data-root", type=Path, default=Path("/home/gahyun/neighformer/data"))
     p.add_argument("--processed-dir", type=Path, default=Path("processed/mtrpp"))
     p.add_argument("--splits", nargs="+", default=["train", "val", "test"], choices=["train", "val", "test"])

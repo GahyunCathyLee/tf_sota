@@ -16,6 +16,7 @@ sys.path.insert(0, str(EXPERIMENT_ROOT.parent))
 
 from sota_experiments.adapters.common import (
     DatasetSpec,
+    FEATURE_MODES,
     dataset_dir,
     ego_channel_count,
     feature_mode_indices,
@@ -31,7 +32,7 @@ from sota_experiments.adapters.common import (
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--dataset", choices=["highD", "exiD"], required=True)
-    parser.add_argument("--feature-mode", choices=["baseline", "dimI"], required=True)
+    parser.add_argument("--feature-mode", choices=sorted(FEATURE_MODES), required=True)
     parser.add_argument("--split", choices=["train", "val", "test"], default="train")
     parser.add_argument("--root", type=Path, default=DATA_ROOT)
     parser.add_argument("--require-split", action="store_true")

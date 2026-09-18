@@ -19,7 +19,7 @@ ADAPTER_DIR = Path(__file__).resolve().parent
 EXPERIMENT_ROOT = ADAPTER_DIR.parents[1]
 sys.path.insert(0, str(EXPERIMENT_ROOT))
 
-from adapters.common import dataset_dir, split_indices_path  # noqa: E402
+from adapters.common import FEATURE_MODES, dataset_dir, split_indices_path  # noqa: E402
 from adapters.multiagent_common import multiagent_indices, multiagent_split_dir  # noqa: E402
 from adapters.qcnet.dataset import NeighFormerQCNetDataset  # noqa: E402
 from adapters.qcnet.multiagent_dataset import MultiAgentQCNetDataset  # noqa: E402
@@ -58,7 +58,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--config", required=True, type=Path)
     p.add_argument("--dataset", choices=["highD", "exiD"])
-    p.add_argument("--feature-mode", choices=["baseline", "dimI"])
+    p.add_argument("--feature-mode", choices=sorted(FEATURE_MODES))
     p.add_argument("--data-root", type=Path)
     p.add_argument("--ckpt-dir", type=Path)
     p.add_argument("--output-dir", type=Path)
@@ -170,7 +170,7 @@ def apply_cli(cfg: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]:
     if not cfg["dataset"] or not cfg["feature_mode"]:
         raise SystemExit("dataset and feature_mode must be set by config or CLI")
     if not cfg["exp_tag"]:
-        cfg["exp_tag"] = f"{cfg['dataset']}{1 if cfg['feature_mode'] == 'dimI' else 0}"
+        cfg["exp_tag"] = f"{cfg['dataset']}_{cfg['feature_mode']}"
     return cfg
 
 
@@ -373,7 +373,7 @@ def main(argv: list[str] | None = None) -> int:
     print("====== QCNet Train ======")
     print(f"upstream : {upstream_dir} ({upstream_commit(upstream_dir)})")
     print(f"data     : {data_path}")
-    print(f"source   : {'multiagent' if cfg.get('multiagent') else 'single-agent dimI'}")
+    print(f"source   : {'multiagent' if cfg.get('multiagent') else 'single-agent canonical'}")
     print(f"lanes    : {lane_cache_root if lane_cache_root else 'pseudo fallback'}")
     print(f"samples  : train={len(train_ds):,} val={len(val_ds):,}")
     print(f"ckpt     : {ckpt_dir}")

@@ -53,6 +53,7 @@ class NeighFormerHiVTDataset(Dataset):
         self.lane_max_segments = int(lane_max_segments)
         self.nb_feature_indices = np.asarray(feature_mode_indices(feature_mode), dtype=np.int64)
         self.nb_feature_names = feature_mode_names(feature_mode)
+        self.extra_feature_indices = self.nb_feature_indices[6:]
         self.node_dim = len(self.nb_feature_indices)
         self.edge_dim = 2
         self._arrays: dict[str, np.ndarray] | None = None
@@ -137,8 +138,8 @@ class NeighFormerHiVTDataset(Dataset):
                 ],
                 axis=-1,
             )
-            if self.node_dim > 6:
-                features[offset, :, 6:] = nb_hist[:, [8, 9]]
+            if self.extra_feature_indices.size:
+                features[offset, :, 6:] = nb_hist[:, self.extra_feature_indices]
             features[offset, ~slot_mask] = 0.0
             padding_mask[offset, :th] = ~slot_mask
 

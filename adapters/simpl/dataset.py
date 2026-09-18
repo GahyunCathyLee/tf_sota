@@ -46,6 +46,7 @@ SIMPL_FEATURE_MODES = {
     "baseline": [],
     "baseline_zero2": ["zero0", "zero1"],
     "dim_only": ["dim"],
+    "I": ["I"],
     "I_only": ["I"],
     "shuffled_I": ["I_shuffled"],
     "dimI": ["dim", "I"],
@@ -181,7 +182,7 @@ class NeighFormerSIMPLDataset(Dataset):
             return extra
         if self.feature_mode == "dim_only":
             extra[valid, 0] = nb_hist[valid, RAW_NB_FEATURES["dim"]]
-        elif self.feature_mode == "I_only":
+        elif self.feature_mode in {"I", "I_only"}:
             extra[valid, 0] = nb_hist[valid, RAW_NB_FEATURES["I"]]
         elif self.feature_mode == "shuffled_I":
             vals = self._shuffled_i_values(real_idx, arrays)

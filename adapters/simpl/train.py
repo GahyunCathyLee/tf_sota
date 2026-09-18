@@ -433,7 +433,7 @@ def main(argv: list[str] | None = None) -> int:
     print("====== SIMPL Train ======")
     print(f"upstream : {upstream_dir} ({upstream_commit(upstream_dir)})")
     print(f"data     : {data_path}")
-    print(f"source   : {'multiagent' if cfg.get('multiagent') else 'single-agent dimI'}")
+    print(f"source   : {'multiagent' if cfg.get('multiagent') else 'single-agent canonical'}")
     print(f"feature  : {cfg['feature_mode']}  actor_features={train_ds.actor_feature_names}")
     print(f"lanes    : {lane_cache_root if lane_cache_root else 'pseudo fallback'}")
     print(f"lane ok  : exists={lane_cache_exists}  source={'cached lanes' if lane_cache_exists else 'pseudo fallback'}")

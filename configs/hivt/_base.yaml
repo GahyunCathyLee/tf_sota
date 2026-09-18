@@ -4,6 +4,7 @@ base: ../models/hivt.yaml
 #   <dataset><feature>-<seed_index>
 #     feature    0 = baseline (pva)
 #                1 = dimI     (pva + dim, I)
+#                2 = I        (pva + I)
 #     seed_index 1=42  2=1234  3=3407  4=0  5=777
 
 training:

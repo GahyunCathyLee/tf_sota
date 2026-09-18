@@ -6,6 +6,28 @@ feature_modes:
   - baseline
   - dimI
 
+model_feature_modes:
+  hivt:
+    - baseline
+    - I
+    - dimI
+  qcnet:
+    - baseline
+    - I
+    - dimI
+  mtrpp:
+    - baseline
+    - I
+    - dimI
+  simpl:
+    - baseline
+    - I
+    - dimI
+  mtp_go:
+    - baseline
+    - I
+    - dimI
+
 models:
   - hivt
   - qcnet

@@ -72,6 +72,7 @@ Feature modes are defined by selecting neighbor channels from `x_nb.npy`:
 
 ```text
 baseline = [0, 1, 2, 3, 4, 5]        # dx, dy, dvx, dvy, dax, day
+I        = [0, 1, 2, 3, 4, 5, 9]     # dx, dy, dvx, dvy, dax, day, I
 dimI     = [0, 1, 2, 3, 4, 5, 8, 9]  # dx, dy, dvx, dvy, dax, day, dim, I
 ```
 

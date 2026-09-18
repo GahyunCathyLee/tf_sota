@@ -36,6 +36,7 @@ sys.path.insert(0, str(EXPERIMENT_ROOT))
 
 from adapters.common import (  # noqa: E402
     DatasetSpec,
+    FEATURE_MODES,
     dataset_dir,
     feature_mode_indices,
     feature_mode_names,
@@ -129,7 +130,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--config", required=True, type=Path)
     # Optional when the config sets them (e.g. the seed-sweep configs).
     p.add_argument("--dataset", choices=["highD", "exiD"])
-    p.add_argument("--feature-mode", choices=["baseline", "dimI"])
+    p.add_argument("--feature-mode", choices=sorted(FEATURE_MODES))
 
     # Paths. All optional: each falls back to the config, then to a default.
     # Relative paths are resolved against the experiment root.
@@ -272,7 +273,7 @@ def load_config(path: Path) -> dict[str, Any]:
 def resolve_run_target(cfg: dict[str, Any], args: argparse.Namespace) -> None:
     """Decide which dataset/feature_mode this run is, CLI winning over config."""
     for name, choices in (("dataset", ("highD", "exiD")),
-                          ("feature_mode", ("baseline", "dimI"))):
+                          ("feature_mode", tuple(sorted(FEATURE_MODES)))):
         value = getattr(args, name, None) or str(cfg.get(name, ""))
         if not value:
             raise SystemExit(

@@ -1,0 +1,9 @@
+# QCNet | highD | I | seed 777
+base: _base.yaml
+
+exp_tag: highD2-5
+dataset: highD
+feature_mode: I
+
+runtime:
+  seed: 777

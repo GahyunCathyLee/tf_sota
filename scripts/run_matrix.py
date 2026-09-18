@@ -132,12 +132,20 @@ def adapter_state(model: str, matrix: dict[str, Any]) -> str:
 def expand_jobs(args: argparse.Namespace, matrix: dict[str, Any]) -> list[dict[str, str]]:
     models = [args.model] if args.model else matrix["models"]
     datasets = [args.dataset] if args.dataset else matrix["datasets"]
-    feature_modes = [args.feature_mode] if args.feature_mode else matrix["feature_modes"]
 
-    return [
-        {"model": model, "dataset": dataset, "feature_mode": feature_mode}
-        for model, dataset, feature_mode in itertools.product(models, datasets, feature_modes)
-    ]
+    jobs = []
+    model_feature_modes = matrix.get("model_feature_modes", {})
+    for model, dataset in itertools.product(models, datasets):
+        feature_modes = (
+            [args.feature_mode]
+            if args.feature_mode
+            else model_feature_modes.get(model, matrix["feature_modes"])
+        )
+        jobs.extend(
+            {"model": model, "dataset": dataset, "feature_mode": feature_mode}
+            for feature_mode in feature_modes
+        )
+    return jobs
 
 
 def write_job_files(jobs: list[dict[str, str]], matrix: dict[str, Any]) -> None:
@@ -167,7 +175,7 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", choices=None, default=None)
     parser.add_argument("--dataset", choices=["highD", "exiD"], default=None)
-    parser.add_argument("--feature-mode", choices=["baseline", "dimI"], default=None)
+    parser.add_argument("--feature-mode", choices=["baseline", "I", "dimI"], default=None)
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--allow-missing-adapter", action="store_true")
     args = parser.parse_args()

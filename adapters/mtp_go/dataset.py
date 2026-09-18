@@ -12,6 +12,7 @@ mirrors):
         ego-relative, exactly the channels upstream ``highD-imp`` uses
 
     feature_mode == "baseline" -> 6 node channels  (x_nb indices 0..5)
+    feature_mode == "I"        -> 7 node channels  (x_nb indices 0..5, 9)
     feature_mode == "dimI"     -> 8 node channels  (x_nb indices 0..5, 8, 9)
                                   channel 6 = dim (vehicle size bin 0..4)
                                   channel 7 = I   (importance in [0, 1])

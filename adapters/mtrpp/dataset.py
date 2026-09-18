@@ -70,6 +70,7 @@ class NeighFormerMTRBuilder:
         self.lane_width = float(lane_width)
         self.nb_feature_indices = np.asarray(feature_mode_indices(feature_mode), dtype=np.int64)
         self.nb_feature_names = feature_mode_names(feature_mode)
+        self.extra_feature_indices = self.nb_feature_indices[6:]
         self._arrays: dict[str, np.ndarray] | None = None
 
         x_ego = np.load(self.data_dir / "x_ego.npy", mmap_mode="r")
@@ -79,7 +80,7 @@ class NeighFormerMTRBuilder:
         self.history_len = int(x_ego.shape[1])
         self.future_len = int(y.shape[1])
         self.raw_max_neighbors = int(x_nb.shape[2])
-        self.extra_dim = 2 if feature_mode == "dimI" else 0
+        self.extra_dim = int(self.extra_feature_indices.size)
         self.agent_attr_dim = 6 + 5 + (self.history_len + 1) + 2 + 2 + 2 + self.extra_dim
         if int(x_ego.shape[2]) != 6:
             raise ValueError(f"Expected x_ego[..., 6], got {x_ego.shape}")
@@ -142,7 +143,7 @@ class NeighFormerMTRBuilder:
             past_state[obj_idx, :, 9] = slot_mask.astype(np.float32)
             past_mask[obj_idx] = slot_mask
             if self.extra_dim:
-                extra[obj_idx, :, :] = nb[:, slot, 8:10]
+                extra[obj_idx, :, :] = nb[:, slot, self.extra_feature_indices]
 
         obj_trajs = self._pack_agent_features(past_state, past_mask, extra)
         obj_trajs_pos = past_state[None, :, :, 0:3].copy()
@@ -272,7 +273,7 @@ class NeighFormerMTRBuilder:
             "neighbor_indices": [int(v) for v in self.nb_feature_indices],
             "neighbor_names": self.nb_feature_names,
             "map_strategy": "straight pseudo-lane polylines in ego-centered coordinates",
-            "dimI_mapping": "appended per-timestep agent attributes" if self.extra_dim else "disabled in baseline",
+            "extra_feature_mapping": "appended per-timestep agent attributes" if self.extra_dim else "disabled in baseline",
         }
 
     def channel_stats(self, indices: np.ndarray, n_samples: int = 256) -> dict[str, Any]:

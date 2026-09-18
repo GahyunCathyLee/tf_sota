@@ -14,6 +14,7 @@ input:
   uses_map: "pseudo_polyline_fallback"
   ego_channels: 6
   neighbor_baseline_channels: 6
+  neighbor_I_channels: 7
   raw_neighbor_channels: 10
   neighbor_dimI_channels: 8
 
