@@ -45,6 +45,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--num-workers", type=int)
     p.add_argument("--device", type=str)
     p.add_argument("--multiagent", action="store_true", help="Use data/{dataset}_multiagent/{split}_full arrays")
+    p.add_argument("--use-interaction-importance", action="store_true", help="Override checkpoint config and enable edge-level I")
     p.add_argument("--scenario", action="store_true")
     p.add_argument("--scenario-labels", type=Path)
     p.add_argument("--max-samples", type=int)
@@ -172,6 +173,9 @@ def main(argv: list[str] | None = None) -> int:
     data_root = resolve_path(args.data_root) if args.data_root else resolve_path(cfg["data_root"])
     cfg = {**cfg, "data_root": str(data_root)}
     use_multiagent = bool(args.multiagent or cfg.get("multiagent"))
+    use_interaction_importance = bool(args.use_interaction_importance or cfg.get("use_interaction_importance"))
+    if use_interaction_importance and not use_multiagent:
+        raise SystemExit("use_interaction_importance=true requires multiagent evaluation data")
     lane_cache_value = args.lane_cache_root or cfg.get("lane_cache_root")
     lane_cache_root = format_path_template(lane_cache_value, cfg) if lane_cache_value else None
     lane_radius = args.lane_radius if args.lane_radius is not None else cfg.get("lane_radius", 120.0)
@@ -182,7 +186,14 @@ def main(argv: list[str] | None = None) -> int:
     if use_multiagent:
         data_path = multiagent_split_dir(data_root, cfg["dataset"], args.split)
         indices = multiagent_indices(data_path, args.max_samples)
-        ds = MultiAgentQCNetDataset(data_path, cfg["dataset"], args.split, indices=indices)
+        ds = MultiAgentQCNetDataset(
+            data_path,
+            cfg["dataset"],
+            args.split,
+            indices=indices,
+            use_interaction_importance=use_interaction_importance,
+            normalize_i=bool(cfg.get("normalize_i")),
+        )
     else:
         data_path = dataset_dir(data_root, cfg["dataset"])
         indices = np.load(split_indices_path(data_root, cfg["dataset"], args.split))
@@ -204,7 +215,7 @@ def main(argv: list[str] | None = None) -> int:
     loader = DataLoader(ds, batch_size=batch_size, shuffle=False, num_workers=num_workers,
                         persistent_workers=num_workers > 0)
 
-    model = build_qcnet(model_args, cfg["feature_mode"])
+    model = build_qcnet(model_args, cfg["feature_mode"], use_interaction_importance)
     model.load_state_dict(ckpt["state_dict"])
     model.to(device)
 
@@ -212,6 +223,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"[INFO] Upstream   : {upstream_dir}")
     print(f"[INFO] Dataset    : {args.split} split  n={len(ds):,}  {cfg['dataset']} {cfg['feature_mode']}")
     print(f"[INFO] Source     : {'multiagent' if use_multiagent else 'single-agent'}")
+    print(f"[INFO] Edge I     : {use_interaction_importance}")
     print(f"[INFO] Lanes      : {lane_cache_root if lane_cache_root else 'pseudo fallback'}")
     gpu = f"  ({torch.cuda.get_device_name(0)})" if device.type == "cuda" else ""
     print(f"[INFO] Device     : {device}{gpu}")

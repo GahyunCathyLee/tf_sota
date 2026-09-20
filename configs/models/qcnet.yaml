@@ -55,6 +55,9 @@ training:
   lane_radius: 120.0
   lane_max_segments: 192
   upstream_dir: external/qcnet
+  multiagent: false
+  use_interaction_importance: false
+  normalize_i: false
 
 runtime:
   seed: 42

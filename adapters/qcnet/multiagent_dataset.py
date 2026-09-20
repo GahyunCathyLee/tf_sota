@@ -17,16 +17,32 @@ from adapters.multiagent_common import (
     scored_local_indices,
 )
 from adapters.qcnet.dataset import _heading_from_velocity, _wrap_angle
+from data.multiagent.interaction import InteractionConfig, build_pair_features
+
+
+INTERACTION_EDGE_TYPE = ("agent", "interaction_importance", "agent")
 
 
 class MultiAgentQCNetDataset(Dataset):
     """QCNet-compatible dataset backed by full multi-agent scene arrays."""
 
-    def __init__(self, data_dir: str | Path, dataset_name: str, split: str, indices: np.ndarray | None = None) -> None:
+    def __init__(
+        self,
+        data_dir: str | Path,
+        dataset_name: str,
+        split: str,
+        indices: np.ndarray | None = None,
+        use_interaction_importance: bool = False,
+        normalize_i: bool = False,
+    ) -> None:
         super().__init__(None, None, None)
         self.data_dir = Path(data_dir)
         self.dataset_name = dataset_name
         self.split = split
+        self.use_interaction_importance = bool(use_interaction_importance)
+        self.normalize_i = bool(normalize_i)
+        if self.normalize_i:
+            raise ValueError("QCNet edge-level I normalization is not implemented; keep normalize_i=false.")
         self.store = MultiAgentArrays(self.data_dir)
         self.scene_indices = np.arange(self.store.num_scenes, dtype=np.int64) if indices is None else np.asarray(indices, dtype=np.int64)
         self.num_historical_steps = self.store.history_len
@@ -90,8 +106,56 @@ class MultiAgentQCNetDataset(Dataset):
         data["agent"]["target"] = target
         data["agent"]["attrs"] = torch.zeros(n, th, 2, dtype=torch.float32)
         data["agent"]["scored_index"] = torch.from_numpy(scored_local)
+        if self.use_interaction_importance:
+            self._add_interaction_importance(data, arrays, scene_idx, keep)
         self._add_pseudo_map(data)
         return data
+
+    def _add_interaction_importance(
+        self,
+        data: HeteroData,
+        arrays: dict[str, np.ndarray],
+        scene_idx: int,
+        keep: np.ndarray,
+    ) -> None:
+        """Attach directed pairwise I as sparse scene-local edges.
+
+        ``build_pair_features`` indexes pair features as
+        ``pair_features[target_i, source_j, timestep, 9]``.  The edge store
+        below uses PyG's normal ``edge_index=[source_j, target_i]`` convention,
+        so the model can later map QCNet social edges via ``I = pair_I[dst, src, t]``.
+        """
+        x = np.asarray(arrays["x_agents"][scene_idx], dtype=np.float32)[keep]
+        obs = np.asarray(arrays["obs_valid"][scene_idx], dtype=bool)[keep]
+        pair_features, pair_valid = build_pair_features(
+            x,
+            obs,
+            np.asarray(arrays["agent_length"][scene_idx], dtype=np.float32)[keep],
+            np.asarray(arrays["agent_width"][scene_idx], dtype=np.float32)[keep],
+            np.asarray(arrays["agent_type"][scene_idx], dtype=np.int8)[keep],
+            np.asarray(arrays["lane_id"][scene_idx], dtype=np.int32)[keep],
+            np.asarray(arrays["lane_offset"][scene_idx], dtype=np.float32)[keep],
+            np.asarray(arrays["lane_width"][scene_idx], dtype=np.float32)[keep],
+            lane_level=np.asarray(arrays["lane_level"][scene_idx], dtype=np.int16)[keep],
+            heading=np.asarray(arrays["heading"][scene_idx], dtype=np.float32)[keep],
+            lateral_velocity=np.asarray(arrays["lateral_velocity"][scene_idx], dtype=np.float32)[keep],
+            config=InteractionConfig(dataset=self.dataset_name, apply_topn=False),
+        )
+        if pair_features.shape[:3] != pair_valid.shape:
+            raise ValueError(
+                f"interaction shape mismatch: pair_features={pair_features.shape}, pair_valid={pair_valid.shape}"
+            )
+        if not np.isfinite(pair_features[..., 9]).all():
+            raise ValueError(f"NaN/Inf found in interaction importance for scene {scene_idx}")
+
+        target, source, time = np.nonzero(pair_valid)
+        importance = pair_features[target, source, time, 9].astype(np.float32)
+        edge_index = np.stack([source, target], axis=0).astype(np.int64)
+
+        data[INTERACTION_EDGE_TYPE]["edge_index"] = torch.from_numpy(edge_index)
+        data[INTERACTION_EDGE_TYPE]["time"] = torch.from_numpy(time.astype(np.int64))
+        data[INTERACTION_EDGE_TYPE]["importance"] = torch.from_numpy(importance)
+        data[INTERACTION_EDGE_TYPE]["pair_valid"] = torch.ones(importance.shape[0], dtype=torch.bool)
 
     def _add_pseudo_map(self, data: HeteroData) -> None:
         l = 120.0
@@ -120,6 +184,8 @@ class MultiAgentQCNetDataset(Dataset):
             "history_len": self.num_historical_steps,
             "future_len": self.num_future_steps,
             "source": "multiagent",
+            "use_interaction_importance": self.use_interaction_importance,
+            "normalize_i": self.normalize_i,
         }
 
     def channel_stats(self, n_samples: int = 256) -> dict[str, Any]:
@@ -127,12 +193,48 @@ class MultiAgentQCNetDataset(Dataset):
         n = min(int(n_samples), self.len())
         retained = []
         scored = []
+        i_rows = []
         for j in range(n):
             scene_idx = int(self.scene_indices[j])
             retained.append(int(np.count_nonzero(arrays["agent_ids"][scene_idx] >= 0)))
             scored.append(int(np.count_nonzero(arrays["scored_agent_mask"][scene_idx])))
+            if self.use_interaction_importance:
+                keep = scene_agent_indices(np.asarray(arrays["agent_ids"][scene_idx]), np.asarray(arrays["obs_valid"][scene_idx], dtype=bool))
+                pair, valid = build_pair_features(
+                    np.asarray(arrays["x_agents"][scene_idx], dtype=np.float32)[keep],
+                    np.asarray(arrays["obs_valid"][scene_idx], dtype=bool)[keep],
+                    np.asarray(arrays["agent_length"][scene_idx], dtype=np.float32)[keep],
+                    np.asarray(arrays["agent_width"][scene_idx], dtype=np.float32)[keep],
+                    np.asarray(arrays["agent_type"][scene_idx], dtype=np.int8)[keep],
+                    np.asarray(arrays["lane_id"][scene_idx], dtype=np.int32)[keep],
+                    np.asarray(arrays["lane_offset"][scene_idx], dtype=np.float32)[keep],
+                    np.asarray(arrays["lane_width"][scene_idx], dtype=np.float32)[keep],
+                    lane_level=np.asarray(arrays["lane_level"][scene_idx], dtype=np.int16)[keep],
+                    heading=np.asarray(arrays["heading"][scene_idx], dtype=np.float32)[keep],
+                    lateral_velocity=np.asarray(arrays["lateral_velocity"][scene_idx], dtype=np.float32)[keep],
+                    config=InteractionConfig(dataset=self.dataset_name, apply_topn=False),
+                )
+                if valid.any():
+                    i_rows.append(pair[..., 9][valid])
+        i_stats = None
+        if i_rows:
+            vals = np.concatenate(i_rows).astype(np.float64)
+            i_stats = {
+                "count": int(vals.size),
+                "min": float(vals.min()),
+                "max": float(vals.max()),
+                "mean": float(vals.mean()),
+                "std": float(vals.std()),
+                "p50": float(np.percentile(vals, 50)),
+                "p75": float(np.percentile(vals, 75)),
+                "p85": float(np.percentile(vals, 85)),
+                "p90": float(np.percentile(vals, 90)),
+                "p95": float(np.percentile(vals, 95)),
+                "p99": float(np.percentile(vals, 99)),
+            }
         return {
             "samples_inspected": n,
             "retained_agents_mean": float(np.mean(retained)) if retained else 0.0,
             "scored_agents_mean": float(np.mean(scored)) if scored else 0.0,
+            "interaction_importance": i_stats,
         }

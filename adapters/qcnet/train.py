@@ -51,6 +51,8 @@ DEFAULTS: dict[str, Any] = {
     "max_eval_samples": None,
     "upstream_dir": "external/qcnet",
     "multiagent": False,
+    "use_interaction_importance": False,
+    "normalize_i": False,
 }
 
 
@@ -77,6 +79,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--lane-max-segments", type=int)
     p.add_argument("--upstream-dir", type=Path)
     p.add_argument("--multiagent", action="store_true", help="Use data/{dataset}_multiagent/{split}_full arrays")
+    p.add_argument("--use-interaction-importance", action="store_true", help="Add directed edge-level I to QCNet a2a relations")
+    p.add_argument("--normalize-i", action="store_true", help="Normalize edge-level I; default/config false keeps raw I")
     p.add_argument("--check-data", action="store_true")
     return p.parse_args(argv)
 
@@ -167,6 +171,10 @@ def apply_cli(cfg: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]:
             cfg[cfg_name] = value
     if args.multiagent:
         cfg["multiagent"] = True
+    if args.use_interaction_importance:
+        cfg["use_interaction_importance"] = True
+    if args.normalize_i:
+        cfg["normalize_i"] = True
     if not cfg["dataset"] or not cfg["feature_mode"]:
         raise SystemExit("dataset and feature_mode must be set by config or CLI")
     if not cfg["exp_tag"]:
@@ -245,6 +253,10 @@ def build_model_args(cfg: dict[str, Any]) -> dict[str, Any]:
     return model
 
 
+def count_parameters(model: torch.nn.Module) -> int:
+    return sum(p.numel() for p in model.parameters())
+
+
 def write_adapter_checkpoint(src_ckpt: Path, dst: Path, cfg: dict[str, Any], model_args: dict[str, Any]) -> None:
     lightning_ckpt = torch.load(src_ckpt, map_location="cpu", weights_only=False)
     dst.parent.mkdir(parents=True, exist_ok=True)
@@ -264,6 +276,13 @@ def write_adapter_checkpoint(src_ckpt: Path, dst: Path, cfg: dict[str, Any], mod
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     cfg = apply_cli(load_config(args.config), args)
+    if cfg.get("use_interaction_importance") and not cfg.get("multiagent"):
+        raise SystemExit("use_interaction_importance=true requires --multiagent / multiagent: true")
+    if cfg.get("use_interaction_importance") and len(FEATURE_MODES[cfg["feature_mode"]]["neighbor_names"]) > 6:
+        raise SystemExit(
+            "use_interaction_importance=true cannot be combined with legacy QCNet agent attrs; "
+            "use feature_mode=baseline for edge-level I."
+        )
     set_seed(int(cfg["seed"]))
 
     data_root = resolve_path(cfg["data_root"])
@@ -277,12 +296,16 @@ def main(argv: list[str] | None = None) -> int:
             cfg["dataset"],
             "train",
             indices=multiagent_indices(train_path, cfg.get("max_train_samples")),
+            use_interaction_importance=bool(cfg.get("use_interaction_importance")),
+            normalize_i=bool(cfg.get("normalize_i")),
         )
         val_ds = MultiAgentQCNetDataset(
             val_path,
             cfg["dataset"],
             "val",
             indices=multiagent_indices(val_path, cfg.get("max_eval_samples")),
+            use_interaction_importance=bool(cfg.get("use_interaction_importance")),
+            normalize_i=bool(cfg.get("normalize_i")),
         )
         data_path = train_path.parent
     else:
@@ -354,7 +377,19 @@ def main(argv: list[str] | None = None) -> int:
     val_loader = DataLoader(val_ds, shuffle=False, drop_last=False, **loader_kwargs)
 
     model_args = build_model_args(cfg)
-    model = build_qcnet(model_args, cfg["feature_mode"])
+    model = build_qcnet(model_args, cfg["feature_mode"], bool(cfg.get("use_interaction_importance")))
+    actual_params = count_parameters(model)
+    if cfg.get("use_interaction_importance"):
+        baseline_params = count_parameters(build_qcnet(model_args, "baseline", False))
+        delta = actual_params - baseline_params
+        pct = (delta / baseline_params * 100.0) if baseline_params else 0.0
+        print("====== QCNet Parameter Count ======")
+        print(f"baseline : {baseline_params:,}")
+        print(f"+I       : {actual_params:,}")
+        print(f"increase : {delta:,} ({pct:.4f}%)")
+    else:
+        print("====== QCNet Parameter Count ======")
+        print(f"model    : {actual_params:,}")
     callbacks = [
         ModelCheckpoint(dirpath=str(ckpt_dir), filename="lightning-best", monitor="val_minFDE", mode="min",
                         save_top_k=1, save_last=True),
