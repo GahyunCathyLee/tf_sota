@@ -7,3 +7,7 @@ feature_mode: baseline
 
 runtime:
   seed: 42
+
+training:
+  multiagent: true
+  use_interaction_importance: false

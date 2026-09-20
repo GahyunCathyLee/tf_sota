@@ -5,3 +5,7 @@ dataset: highD
 feature_mode: baseline
 runtime:
   seed: 1234
+
+training:
+  multiagent: true
+  use_importance: false

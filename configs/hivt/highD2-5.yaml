@@ -1,7 +1,11 @@
-# HiVT | highD | I | seed 777
+# HiVT | highD | edge I | seed 777
 base: _base.yaml
 exp_tag: highD2-5
 dataset: highD
-feature_mode: I
+feature_mode: baseline
 runtime:
   seed: 777
+
+training:
+  multiagent: true
+  use_importance: true

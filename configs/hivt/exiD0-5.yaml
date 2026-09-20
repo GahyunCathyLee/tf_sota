@@ -5,3 +5,7 @@ dataset: exiD
 feature_mode: baseline
 runtime:
   seed: 777
+
+training:
+  multiagent: true
+  use_importance: false

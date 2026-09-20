@@ -1,9 +1,14 @@
-# QCNet | highD | I | seed 1234
+# QCNet | highD | edge I | seed 1234
 base: _base.yaml
 
 exp_tag: highD2-2
 dataset: highD
-feature_mode: I
+feature_mode: baseline
 
 runtime:
   seed: 1234
+
+training:
+  multiagent: true
+  use_interaction_importance: true
+  normalize_i: false
