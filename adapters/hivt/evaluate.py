@@ -44,6 +44,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--num-workers", type=int)
     p.add_argument("--device")
     p.add_argument("--multiagent", action="store_true", help="Use data/{dataset}_multiagent/{split}_full arrays")
+    p.add_argument("--use-importance", action="store_true", help="Override checkpoint config and enable local edge I")
     p.add_argument("--scenario", action="store_true")
     p.add_argument("--scenario-labels", type=Path)
     p.add_argument("--max-samples", type=int)
@@ -156,6 +157,10 @@ def main(argv: list[str] | None = None) -> int:
     data_root = resolve_path(args.data_root) if args.data_root else resolve_path(cfg["data_root"])
     cfg = {**cfg, "data_root": str(data_root)}
     use_multiagent = bool(args.multiagent or cfg.get("multiagent"))
+    use_importance = bool(args.use_importance or cfg.get("use_importance"))
+    if use_importance and not use_multiagent:
+        raise SystemExit("use_importance=true requires multiagent evaluation data")
+    model_args["use_importance"] = use_importance
     lane_cache_value = args.lane_cache_root or cfg.get("lane_cache_root")
     lane_cache_root = format_path_template(lane_cache_value, cfg) if lane_cache_value else None
     lane_radius = args.lane_radius if args.lane_radius is not None else cfg.get("lane_radius", 120.0)
@@ -165,7 +170,13 @@ def main(argv: list[str] | None = None) -> int:
     if use_multiagent:
         data_path = multiagent_split_dir(data_root, cfg["dataset"], args.split)
         indices = multiagent_indices(data_path, args.max_samples)
-        ds = MultiAgentHiVTDataset(data_path, cfg["dataset"], args.split, indices=indices)
+        ds = MultiAgentHiVTDataset(
+            data_path,
+            cfg["dataset"],
+            args.split,
+            indices=indices,
+            use_importance=use_importance,
+        )
     else:
         data_path = dataset_dir(data_root, cfg["dataset"])
         indices = np.load(split_indices_path(data_root, cfg["dataset"], args.split))
@@ -194,6 +205,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"[INFO] Upstream   : {upstream_dir}")
     print(f"[INFO] Dataset    : {args.split} split  n={len(ds):,}  {cfg['dataset']} {cfg['feature_mode']}")
     print(f"[INFO] Source     : {'multiagent' if use_multiagent else 'single-agent'}")
+    print(f"[INFO] Edge I     : {use_importance}")
     print(f"[INFO] Lanes      : {lane_cache_root if lane_cache_root else 'pseudo fallback'}")
     gpu = f"  ({torch.cuda.get_device_name(0)})" if device.type == "cuda" else ""
     print(f"[INFO] Device     : {device}{gpu}")
@@ -221,6 +233,7 @@ def main(argv: list[str] | None = None) -> int:
             ("global_layers", model_args.get("num_global_layers")),
             ("local_radius", model_args.get("local_radius")),
             ("rotate", model_args.get("rotate")),
+            ("use_importance", model_args.get("use_importance")),
         ]
     )
 

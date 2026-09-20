@@ -56,6 +56,7 @@ DEFAULTS: dict[str, Any] = {
     "max_eval_samples": None,
     "upstream_dir": "external/hivt",
     "multiagent": False,
+    "use_importance": False,
     "model_hparams": {},
     "smoke": {
         "epochs": 2,
@@ -99,6 +100,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--lane-max-segments", type=int)
     p.add_argument("--upstream-dir", type=Path)
     p.add_argument("--multiagent", action="store_true", help="Use data/{dataset}_multiagent/{split}_full arrays")
+    p.add_argument("--use-importance", action="store_true", help="Add scalar I to HiVT local agent-agent edge features")
     p.add_argument("--check-data", action="store_true")
     return p.parse_args(argv)
 
@@ -186,6 +188,8 @@ def apply_cli(cfg: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]:
             cfg[cfg_name] = value
     if args.multiagent:
         cfg["multiagent"] = True
+    if args.use_importance:
+        cfg["use_importance"] = True
     if args.progress_bar:
         cfg["progress_bar"] = True
     if not cfg["dataset"] or not cfg["feature_mode"]:
@@ -310,6 +314,7 @@ def build_model_args(cfg: dict[str, Any], ds: NeighFormerHiVTDataset) -> dict[st
         "lr": 5.0e-4,
         "weight_decay": 1.0e-4,
         "T_max": int(cfg["epochs"]),
+        "use_importance": bool(cfg.get("use_importance")),
     }
     model.update(cfg.get("model_hparams") or {})
     model["historical_steps"] = ds.history_len
@@ -317,9 +322,14 @@ def build_model_args(cfg: dict[str, Any], ds: NeighFormerHiVTDataset) -> dict[st
     model["node_dim"] = ds.node_dim
     model["edge_dim"] = ds.edge_dim
     model["T_max"] = int(model.get("T_max") or cfg["epochs"])
+    model["use_importance"] = bool(cfg.get("use_importance"))
     if model["rotate"] and model["node_dim"] != 2:
         raise SystemExit("HiVT rotate=True is only compatible with node_dim=2; use rotate: false for these feature modes.")
     return model
+
+
+def parameter_count(model: torch.nn.Module) -> int:
+    return sum(p.numel() for p in model.parameters())
 
 
 def write_adapter_checkpoint(src_ckpt: Path, dst: Path, cfg: dict[str, Any], model_args: dict[str, Any]) -> None:
@@ -342,6 +352,13 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     cfg = apply_cli(load_config(args.config), args)
     print(f"[INIT] HiVT config loaded: {args.config}  mode={cfg['mode']}", flush=True)
+    if cfg.get("use_importance") and not cfg.get("multiagent"):
+        raise SystemExit("use_importance=true requires --multiagent / multiagent: true")
+    if cfg.get("use_importance") and len(FEATURE_MODES[cfg["feature_mode"]]["neighbor_names"]) > 6:
+        raise SystemExit(
+            "use_importance=true cannot be combined with legacy HiVT feature modes that add proposed node features; "
+            "use --feature-mode baseline."
+        )
     set_seed(int(cfg["seed"]))
     set_matmul_precision(cfg.get("matmul_precision"))
 
@@ -359,12 +376,14 @@ def main(argv: list[str] | None = None) -> int:
             cfg["dataset"],
             "train",
             indices=multiagent_indices(train_path, cfg.get("max_train_samples")),
+            use_importance=bool(cfg.get("use_importance")),
         )
         val_ds = MultiAgentHiVTDataset(
             val_path,
             cfg["dataset"],
             "val",
             indices=multiagent_indices(val_path, cfg.get("max_eval_samples")),
+            use_importance=bool(cfg.get("use_importance")),
         )
         data_path = train_path.parent
     else:
@@ -431,6 +450,20 @@ def main(argv: list[str] | None = None) -> int:
     model_args = build_model_args(cfg, train_ds)
     print("[MODEL] building HiVT", flush=True)
     model = HiVT(**model_args)
+    params = parameter_count(model)
+    print(f"[MODEL] parameters={params:,}", flush=True)
+    if cfg.get("use_importance"):
+        baseline_args = dict(model_args)
+        baseline_args["use_importance"] = False
+        baseline = HiVT(**baseline_args)
+        baseline_params = parameter_count(baseline)
+        diff = params - baseline_params
+        pct = 100.0 * diff / baseline_params if baseline_params else 0.0
+        print(
+            f"[MODEL] baseline_params={baseline_params:,} +I_params={params:,} "
+            f"increase={diff:,} ({pct:.4f}%)",
+            flush=True,
+        )
     callbacks = [
         ModelCheckpoint(dirpath=str(ckpt_dir), filename="lightning-best", monitor="val_minFDE", mode="min",
                         save_top_k=1, save_last=True),
@@ -456,6 +489,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"samples  : train={len(train_ds):,} val={len(val_ds):,}", flush=True)
     print(f"mode     : {cfg['mode']}  epochs={cfg['epochs']}  batch_size={cfg['batch_size']}", flush=True)
     print(f"node_dim : {train_ds.node_dim}", flush=True)
+    print(f"edge I   : {bool(cfg.get('use_importance'))}", flush=True)
     print(f"ckpt     : {ckpt_dir}", flush=True)
     trainer.fit(model, train_loader, val_loader)
 

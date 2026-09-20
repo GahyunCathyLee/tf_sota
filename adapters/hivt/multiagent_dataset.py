@@ -12,16 +12,25 @@ from torch_geometric.data import Dataset
 
 from adapters.hivt.dataset import _heading_from_velocity, _step_displacements
 from adapters.multiagent_common import MultiAgentArrays, agent_positions, scene_agent_indices, scored_local_indices
+from data.multiagent.interaction import InteractionConfig, build_pair_features
 
 
 class MultiAgentHiVTDataset(Dataset):
     """HiVT-compatible dataset backed by full multi-agent scene arrays."""
 
-    def __init__(self, data_dir: str | Path, dataset_name: str, split: str, indices: np.ndarray | None = None) -> None:
+    def __init__(
+        self,
+        data_dir: str | Path,
+        dataset_name: str,
+        split: str,
+        indices: np.ndarray | None = None,
+        use_importance: bool = False,
+    ) -> None:
         super().__init__(None, None, None)
         self.data_dir = Path(data_dir)
         self.dataset_name = dataset_name
         self.split = split
+        self.use_importance = bool(use_importance)
         self.store = MultiAgentArrays(self.data_dir)
         self.scene_indices = np.arange(self.store.num_scenes, dtype=np.int64) if indices is None else np.asarray(indices, dtype=np.int64)
         self.history_len = self.store.history_len
@@ -66,9 +75,10 @@ class MultiAgentHiVTDataset(Dataset):
             if n > 1
             else torch.empty(2, 0, dtype=torch.long)
         )
+        importance = self._edge_importance(arrays, scene_idx, keep, edge_index) if self.use_importance else None
         lane = self._pseudo_lane_features(positions[:, th - 1])
         scored_local = scored_local_indices(scored, keep)
-        return TemporalData(
+        data = TemporalData(
             x=torch.from_numpy(features),
             positions=torch.from_numpy(positions),
             edge_index=edge_index,
@@ -92,6 +102,69 @@ class MultiAgentHiVTDataset(Dataset):
             track_id=torch.tensor([int(arrays["ego_trackId"][scene_idx])], dtype=torch.long),
             frame_id=torch.tensor([int(arrays["t0_frame"][scene_idx])], dtype=torch.long),
         )
+        if importance is not None:
+            data.edge_importance = importance["importance"]
+            data.edge_pair_valid = importance["pair_valid"]
+            data.agent_original_idx = torch.from_numpy(keep.astype(np.int64))
+        return data
+
+    def _edge_importance(
+        self,
+        arrays: dict[str, np.ndarray],
+        scene_idx: int,
+        keep: np.ndarray,
+        edge_index: torch.Tensor,
+    ) -> dict[str, torch.Tensor]:
+        """Return ``I`` aligned with ``edge_index=[source_local, target_local]``.
+
+        ``build_pair_features`` uses original scene-agent axes and stores
+        directed importance as ``pair_features[target, source, t, 9]``.
+        """
+        th = self.history_len
+        edge_count = int(edge_index.size(1))
+        importance = np.zeros((edge_count, th), dtype=np.float32)
+        pair_valid_edge = np.zeros((edge_count, th), dtype=bool)
+        if edge_count == 0:
+            return {
+                "importance": torch.from_numpy(importance),
+                "pair_valid": torch.from_numpy(pair_valid_edge),
+            }
+
+        pair_features, pair_valid = build_pair_features(
+            np.asarray(arrays["x_agents"][scene_idx], dtype=np.float32),
+            np.asarray(arrays["obs_valid"][scene_idx], dtype=bool),
+            np.asarray(arrays["agent_length"][scene_idx], dtype=np.float32),
+            np.asarray(arrays["agent_width"][scene_idx], dtype=np.float32),
+            np.asarray(arrays["agent_type"][scene_idx], dtype=np.int16),
+            np.asarray(arrays["lane_id"][scene_idx], dtype=np.int32),
+            np.asarray(arrays["lane_offset"][scene_idx], dtype=np.float32),
+            np.asarray(arrays["lane_width"][scene_idx], dtype=np.float32),
+            lane_level=np.asarray(arrays["lane_level"][scene_idx], dtype=np.int16) if "lane_level" in arrays else None,
+            heading=np.asarray(arrays["heading"][scene_idx], dtype=np.float32) if "heading" in arrays else None,
+            lateral_velocity=(
+                np.asarray(arrays["lateral_velocity"][scene_idx], dtype=np.float32)
+                if "lateral_velocity" in arrays
+                else None
+            ),
+            config=InteractionConfig(dataset=self.dataset_name, apply_topn=False),
+        )
+        if pair_features.shape[:3] != pair_valid.shape or pair_features.shape[2] != th:
+            raise ValueError(
+                f"interaction shape mismatch: pair_features={pair_features.shape}, pair_valid={pair_valid.shape}"
+            )
+        if not np.isfinite(pair_features[..., 9]).all():
+            raise ValueError(f"NaN/Inf found in interaction importance for scene {scene_idx}")
+
+        src_local = edge_index[0].numpy()
+        dst_local = edge_index[1].numpy()
+        src_orig = keep[src_local]
+        dst_orig = keep[dst_local]
+        importance[:, :] = pair_features[dst_orig, src_orig, :, 9]
+        pair_valid_edge[:, :] = pair_valid[dst_orig, src_orig, :]
+        return {
+            "importance": torch.from_numpy(importance),
+            "pair_valid": torch.from_numpy(pair_valid_edge),
+        }
 
     def _pseudo_lane_features(self, node_positions: np.ndarray) -> dict[str, torch.Tensor]:
         xs = np.linspace(-120.0, 120.0, 25, dtype=np.float32)
@@ -127,6 +200,8 @@ class MultiAgentHiVTDataset(Dataset):
             "history_len": self.history_len,
             "future_len": self.future_len,
             "node_dim": self.node_dim,
+            "edge_dim": self.edge_dim,
+            "use_importance": self.use_importance,
             "source": "multiagent",
         }
 
@@ -135,12 +210,33 @@ class MultiAgentHiVTDataset(Dataset):
         n = min(int(n_samples), self.len())
         retained = []
         scored = []
+        importance_rows = []
         for j in range(n):
             scene_idx = int(self.scene_indices[j])
-            retained.append(int(np.count_nonzero(arrays["agent_ids"][scene_idx] >= 0)))
+            agent_ids = np.asarray(arrays["agent_ids"][scene_idx])
+            obs = np.asarray(arrays["obs_valid"][scene_idx], dtype=bool)
+            keep = scene_agent_indices(agent_ids, obs)
+            retained.append(int(keep.size))
             scored.append(int(np.count_nonzero(arrays["scored_agent_mask"][scene_idx])))
+            if self.use_importance and keep.size > 1:
+                edge_index = torch.tensor(list(permutations(range(int(keep.size)), 2)), dtype=torch.long).t().contiguous()
+                imp = self._edge_importance(arrays, scene_idx, keep, edge_index)
+                valid_imp = imp["importance"][imp["pair_valid"]]
+                if valid_imp.numel():
+                    importance_rows.append(valid_imp.numpy())
+        i_stats = None
+        if importance_rows:
+            values = np.concatenate(importance_rows).astype(np.float64)
+            i_stats = {
+                "count": int(values.size),
+                "min": float(values.min()),
+                "max": float(values.max()),
+                "mean": float(values.mean()),
+                "std": float(values.std()),
+            }
         return {
             "samples_inspected": n,
             "retained_agents_mean": float(np.mean(retained)) if retained else 0.0,
             "scored_agents_mean": float(np.mean(scored)) if scored else 0.0,
+            "importance": i_stats,
         }
