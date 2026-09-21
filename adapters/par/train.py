@@ -81,6 +81,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--seed", type=int)
     p.add_argument("--device")
     p.add_argument("--lr", type=float)
+    p.add_argument("--log-interval", type=int)
     p.add_argument("--max-train-samples", type=int)
     p.add_argument("--max-eval-samples", type=int)
     p.add_argument("--upstream-dir", type=Path)
@@ -166,6 +167,7 @@ def apply_cli(cfg: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]:
         ("seed", "seed"),
         ("device", "device"),
         ("lr", "lr"),
+        ("log_interval", "log_interval"),
         ("max_train_samples", "max_train_samples"),
         ("max_eval_samples", "max_eval_samples"),
         ("upstream_dir", "upstream_dir"),
@@ -413,7 +415,7 @@ def main(argv: list[str] | None = None) -> int:
 
     def log(msg: str, console: bool = True) -> None:
         if console:
-            print(msg)
+            print(msg, flush=True)
         with log_path.open("a", encoding="utf-8") as f:
             f.write(msg + "\n")
 
@@ -423,6 +425,7 @@ def main(argv: list[str] | None = None) -> int:
     log(f"source   : {'multiagent' if cfg.get('multiagent') else 'single-agent'}")
     log(f"samples  : train={len(train_ds):,} val={len(val_ds):,}")
     log(f"mode     : {cfg['mode']}  feature={cfg['feature_mode']}  use_importance={bool(cfg.get('use_importance'))}  side_dim={train_ds.side_dim}")
+    log(f"batch    : size={int(cfg['batch_size'])} train_batches={len(train_loader):,} val_batches={len(val_loader):,} log_interval={int(cfg['log_interval'])}")
     log(f"device   : {device}")
     log(f"params   : {n_params:,}")
     log(f"ckpt     : {ckpt_dir}")
@@ -444,6 +447,16 @@ def main(argv: list[str] | None = None) -> int:
             total_loss += float(loss.detach())
             total_tokens += int(parts["tokens_supervised"])
             n_batches += 1
+            if int(cfg["log_interval"]) > 0 and n_batches % int(cfg["log_interval"]) == 0:
+                samples_seen = min(n_batches * int(cfg["batch_size"]), len(train_ds))
+                log(
+                    f"  train epoch={epoch:03d} "
+                    f"batch={n_batches:,}/{len(train_loader):,} "
+                    f"samples={samples_seen:,}/{len(train_ds):,} "
+                    f"loss={total_loss / max(1, n_batches):.4f} "
+                    f"tokens={total_tokens:,} "
+                    f"elapsed={(time.perf_counter() - epoch_start) / 60.0:.1f}m"
+                )
 
         train_loss = total_loss / max(1, n_batches)
         last_val = evaluate_model(model, val_loader, val_ds, device, cfg)
