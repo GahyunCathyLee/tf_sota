@@ -1,9 +1,10 @@
-# MTR++ | exiD | attention-I | seed 42
+# MTR | exiD | attention-I | seed 42
 base: _base.yaml
 exp_tag: exiD2-1
 dataset: exiD
 feature_mode: baseline
 training:
+  architecture: mtr
   use_importance: true
 runtime:
   seed: 42

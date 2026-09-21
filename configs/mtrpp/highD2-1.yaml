@@ -1,9 +1,10 @@
-# MTR++ | highD | attention-I | seed 42
+# MTR | highD | attention-I | seed 42
 base: _base.yaml
 exp_tag: highD2-1
 dataset: highD
 feature_mode: baseline
 training:
+  architecture: mtr
   use_importance: true
 runtime:
   seed: 42
