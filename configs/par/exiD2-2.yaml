@@ -1,0 +1,12 @@
+# PAR | exiD | baseline+I | seed 1234
+#   python adapters/par/train.py --config configs/par/exiD2-2.yaml --mode full --multiagent
+base: _base.yaml
+
+exp_tag: exiD2-2
+dataset: exiD
+feature_mode: I
+use_importance: true
+
+runtime:
+  seed: 1234
+

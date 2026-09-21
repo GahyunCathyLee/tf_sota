@@ -1,0 +1,12 @@
+# PAR | highD | baseline+I | seed 0
+#   python adapters/par/train.py --config configs/par/highD2-4.yaml --mode full --multiagent
+base: _base.yaml
+
+exp_tag: highD2-4
+dataset: highD
+feature_mode: I
+use_importance: true
+
+runtime:
+  seed: 0
+
