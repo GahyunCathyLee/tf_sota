@@ -1,0 +1,23 @@
+# PAR on Colab.
+#
+# Inherits hyperparameters from par.yaml and redirects outputs to Google Drive,
+# so checkpoints and logs survive a Colab runtime reset.
+#
+# Example baseline+I multi-agent run matching configs/par/exiD2-1.yaml:
+#
+#   python adapters/par/train.py --config configs/models/par_colab.yaml \
+#       --dataset exiD --feature-mode I --exp-tag exiD2-1 \
+#       --mode full --multiagent --use-importance --log-interval 10
+
+base: par.yaml
+
+display_name: "PAR (Colab)"
+
+training:
+  output_dir: "/content/drive/MyDrive/TrajectoryPrediction/sota_experiments/runs/par/{dataset}/{feature_mode}/{exp_tag}"
+  ckpt_dir: "/content/drive/MyDrive/TrajectoryPrediction/sota_experiments/ckpts/par"
+  tensorboard_dir: "/content/drive/MyDrive/TrajectoryPrediction/sota_experiments/tensorboard/par"
+
+runtime:
+  # Colab VMs usually have fewer CPU cores than the local workstation.
+  n_workers: 2

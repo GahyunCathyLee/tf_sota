@@ -69,7 +69,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--config", required=True, type=Path)
     p.add_argument("--mode", default="smoke", choices=["smoke", "full", "check-data"])
     p.add_argument("--dataset", choices=["highD", "exiD"])
-    p.add_argument("--feature-mode", choices=["baseline", "dimI"])
+    p.add_argument("--feature-mode", choices=["baseline", "dimI", "I"])
     p.add_argument("--data-root", type=Path)
     p.add_argument("--ckpt-dir", type=Path)
     p.add_argument("--output-dir", type=Path)

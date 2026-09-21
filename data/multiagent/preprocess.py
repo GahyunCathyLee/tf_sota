@@ -124,7 +124,7 @@ def _sample_indices(
         meta_rec = np.load(paths.canonical_dir / "meta_recordingId.npy", mmap_mode="r")
         recs = np.sort(np.unique(meta_rec[indices]))[: int(max_recordings)]
         indices = indices[np.isin(meta_rec[indices], recs)]
-    if max_samples is not None:
+    if max_samples is not None and int(max_samples) > 0:
         indices = indices[: int(max_samples)]
     return np.sort(indices.astype(np.int64))
 
@@ -758,7 +758,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--dataset", choices=["highD", "exiD", "both"], default="both")
     parser.add_argument("--split", choices=["train", "val", "test"], default="train")
     parser.add_argument("--subset-name", default="train_subset")
-    parser.add_argument("--max-samples", type=int, default=5000)
+    parser.add_argument("--max-samples", type=int, default=5000, help="Maximum canonical windows to convert; <=0 means full split.")
     parser.add_argument("--max-recordings", type=int)
     parser.add_argument("--target-hz", type=float, default=3.0)
     parser.add_argument("--context-radius", type=float, default=120.0)
