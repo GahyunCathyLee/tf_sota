@@ -5,6 +5,12 @@ adapter_dir: "adapters/par"
 
 exp_tag: ""
 
+# null preserves the existing seed-sweep convention:
+#   feature_mode=baseline -> native tokens only
+#   feature_mode=dimI     -> native tokens + scalar I only
+# Set explicitly to false/true to decouple the run label from the input.
+use_importance:
+
 data:
   # PAR-specific preprocessing writes/links the canonical arrays plus
   # fixed-neighbour future labels under data/par/<dataset>/dimI.
@@ -17,7 +23,7 @@ input:
   uses_map: false
   ego_channels: 6
   neighbor_baseline_channels: 6
-  raw_neighbor_channels: 10
+  raw_neighbor_channels: 13
   neighbor_dimI_channels: 8
 
 training:
@@ -69,4 +75,4 @@ notes:
   - "Official code includes a NuScenes car trajectory task using xy trajectories."
   - "Run data/par/preprocess.py to add fixed-ID neighbour futures without modifying ../neighformer."
   - "If y_nb.npy is absent, the adapter falls back to ego-only future loss."
-  - "dim and I are continuous side-channel embeddings attached to neighbour token embeddings in dimI mode."
+  - "use_importance adds only scalar I as a 1-D side-channel embedding; dim/lis/gate/I_x/I_y are not consumed."

@@ -23,8 +23,10 @@ sys.path.insert(0, str(EXPERIMENT_ROOT))
 
 from adapters.common import dataset_dir, split_indices_path  # noqa: E402
 from adapters.mtp_go.metrics import MetricAccumulator, print_metrics  # noqa: E402
+from adapters.multiagent_common import multiagent_indices, multiagent_split_dir  # noqa: E402
 from adapters.par.dataset import NeighFormerPARDataset, reconstruct_accel_tokens  # noqa: E402
 from adapters.par.model import PARTrajectoryModel  # noqa: E402
+from adapters.par.multiagent_dataset import MultiAgentPARDataset  # noqa: E402
 from adapters.par.upstream import add_upstream_to_path, upstream_commit  # noqa: E402
 
 
@@ -57,6 +59,8 @@ DEFAULTS: dict[str, Any] = {
     "velocity_bins": 128,
     "multinomial_sampling": False,
     "model_hparams": {},
+    "multiagent": False,
+    "use_importance": None,
 }
 
 
@@ -82,6 +86,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--upstream-dir", type=Path)
     p.add_argument("--resume", type=Path)
     p.add_argument("--check-data", action="store_true")
+    p.add_argument("--multiagent", action="store_true", help="Use data/{dataset}_multiagent/{split}_full arrays")
+    group = p.add_mutually_exclusive_group()
+    group.add_argument("--use-importance", dest="use_importance", action="store_true")
+    group.add_argument("--no-use-importance", dest="use_importance", action="store_false")
+    p.set_defaults(use_importance=None)
     return p.parse_args(argv)
 
 
@@ -132,7 +141,7 @@ def load_config(path: Path) -> dict[str, Any]:
     for key in ("acc_token_size", "velocity_bins", "multinomial_sampling"):
         if key in cfg["model_hparams"]:
             cfg[key] = cfg["model_hparams"][key]
-    for key in ("adapter", "dataset", "feature_mode", "exp_tag", "upstream_dir"):
+    for key in ("adapter", "dataset", "feature_mode", "exp_tag", "upstream_dir", "use_importance"):
         if key in raw:
             cfg[key] = raw[key]
     if isinstance(raw.get("smoke"), dict):
@@ -164,6 +173,12 @@ def apply_cli(cfg: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]:
         value = getattr(args, cli_name)
         if value is not None:
             cfg[cfg_name] = value
+    if args.multiagent:
+        cfg["multiagent"] = True
+        if args.data_root is None and str(cfg.get("data_root", "")) == "data/par":
+            cfg["data_root"] = "data"
+    if args.use_importance is not None:
+        cfg["use_importance"] = bool(args.use_importance)
     if args.mode == "smoke":
         smoke = cfg.get("smoke") or {}
         for key, value in smoke.items():
@@ -175,6 +190,8 @@ def apply_cli(cfg: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]:
         raise SystemExit("dataset and feature_mode must be set by config or CLI")
     if not cfg["exp_tag"]:
         cfg["exp_tag"] = f"{cfg['dataset']}{1 if cfg['feature_mode'] == 'dimI' else 0}"
+    if cfg.get("use_importance") is None:
+        cfg["use_importance"] = cfg["feature_mode"] != "baseline"
     if not cfg.get("output_dir"):
         cfg["output_dir"] = DEFAULTS["output_dir"]
     cfg["mode"] = "check-data" if args.check_data else args.mode
@@ -308,27 +325,54 @@ def main(argv: list[str] | None = None) -> int:
         torch.backends.cudnn.benchmark = True
 
     data_root = resolve_path(cfg["data_root"])
-    data_path = dataset_dir(data_root, cfg["dataset"])
-    train_idx = subset_indices(np.load(split_indices_path(data_root, cfg["dataset"], "train")), cfg.get("max_train_samples"))
-    val_idx = subset_indices(np.load(split_indices_path(data_root, cfg["dataset"], "val")), cfg.get("max_eval_samples"))
-    train_ds = NeighFormerPARDataset(
-        data_path,
-        train_idx,
-        cfg["dataset"],
-        cfg["feature_mode"],
-        "train",
-        acc_token_size=int(cfg["acc_token_size"]),
-        velocity_bins=int(cfg["velocity_bins"]),
-    )
-    val_ds = NeighFormerPARDataset(
-        data_path,
-        val_idx,
-        cfg["dataset"],
-        cfg["feature_mode"],
-        "val",
-        acc_token_size=int(cfg["acc_token_size"]),
-        velocity_bins=int(cfg["velocity_bins"]),
-    )
+    if cfg.get("multiagent"):
+        train_path = multiagent_split_dir(data_root, cfg["dataset"], "train")
+        val_path = multiagent_split_dir(data_root, cfg["dataset"], "val")
+        train_ds = MultiAgentPARDataset(
+            train_path,
+            cfg["dataset"],
+            cfg["feature_mode"],
+            "train",
+            indices=multiagent_indices(train_path, cfg.get("max_train_samples")),
+            acc_token_size=int(cfg["acc_token_size"]),
+            velocity_bins=int(cfg["velocity_bins"]),
+            use_importance=bool(cfg.get("use_importance")),
+        )
+        val_ds = MultiAgentPARDataset(
+            val_path,
+            cfg["dataset"],
+            cfg["feature_mode"],
+            "val",
+            indices=multiagent_indices(val_path, cfg.get("max_eval_samples")),
+            acc_token_size=int(cfg["acc_token_size"]),
+            velocity_bins=int(cfg["velocity_bins"]),
+            use_importance=bool(cfg.get("use_importance")),
+        )
+        data_path = train_path.parent
+    else:
+        data_path = dataset_dir(data_root, cfg["dataset"])
+        train_idx = subset_indices(np.load(split_indices_path(data_root, cfg["dataset"], "train")), cfg.get("max_train_samples"))
+        val_idx = subset_indices(np.load(split_indices_path(data_root, cfg["dataset"], "val")), cfg.get("max_eval_samples"))
+        train_ds = NeighFormerPARDataset(
+            data_path,
+            train_idx,
+            cfg["dataset"],
+            cfg["feature_mode"],
+            "train",
+            acc_token_size=int(cfg["acc_token_size"]),
+            velocity_bins=int(cfg["velocity_bins"]),
+            use_importance=bool(cfg.get("use_importance")),
+        )
+        val_ds = NeighFormerPARDataset(
+            data_path,
+            val_idx,
+            cfg["dataset"],
+            cfg["feature_mode"],
+            "val",
+            acc_token_size=int(cfg["acc_token_size"]),
+            velocity_bins=int(cfg["velocity_bins"]),
+            use_importance=bool(cfg.get("use_importance")),
+        )
 
     output_dir = format_path_template(cfg["output_dir"], cfg)
     ckpt_dir = (format_path_template(cfg["ckpt_dir"], cfg) / cfg["exp_tag"]) if cfg.get("ckpt_dir") else (output_dir / "checkpoints")
@@ -376,8 +420,9 @@ def main(argv: list[str] | None = None) -> int:
     log("====== PAR Train ======")
     log(f"upstream : {upstream_dir} ({upstream_commit(upstream_dir)})")
     log(f"data     : {data_path}")
+    log(f"source   : {'multiagent' if cfg.get('multiagent') else 'single-agent'}")
     log(f"samples  : train={len(train_ds):,} val={len(val_ds):,}")
-    log(f"mode     : {cfg['mode']}  feature={cfg['feature_mode']}  side_dim={train_ds.side_dim}")
+    log(f"mode     : {cfg['mode']}  feature={cfg['feature_mode']}  use_importance={bool(cfg.get('use_importance'))}  side_dim={train_ds.side_dim}")
     log(f"device   : {device}")
     log(f"params   : {n_params:,}")
     log(f"ckpt     : {ckpt_dir}")

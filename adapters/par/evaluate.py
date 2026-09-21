@@ -27,8 +27,10 @@ from adapters.mtp_go.metrics import (  # noqa: E402
     print_metrics,
     print_scenario_results,
 )
+from adapters.multiagent_common import multiagent_indices, multiagent_split_dir  # noqa: E402
 from adapters.par.dataset import NeighFormerPARDataset  # noqa: E402
 from adapters.par.model import PARTrajectoryModel  # noqa: E402
+from adapters.par.multiagent_dataset import MultiAgentPARDataset  # noqa: E402
 from adapters.par.train import build_model, move_batch, predict_batch, resolve_path  # noqa: E402
 from adapters.par.upstream import add_upstream_to_path  # noqa: E402
 
@@ -44,6 +46,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--scenario", action="store_true")
     p.add_argument("--scenario-labels", type=Path)
     p.add_argument("--max-samples", type=int)
+    p.add_argument("--multiagent", action="store_true", help="Use data/{dataset}_multiagent/{split}_full arrays")
     p.add_argument("--measure-time", action="store_true")
     p.add_argument("--warmup", type=int, default=1000)
     p.add_argument("--iters", type=int, default=10000)
@@ -117,19 +120,35 @@ def main(argv: list[str] | None = None) -> int:
 
     device = torch.device(args.device) if args.device else torch.device("cuda" if torch.cuda.is_available() else "cpu")
     data_root = resolve_path(args.data_root) if args.data_root else resolve_path(cfg["data_root"])
-    data_path = dataset_dir(data_root, cfg["dataset"])
-    indices = np.load(split_indices_path(data_root, cfg["dataset"], args.split))
-    if args.max_samples is not None:
-        indices = indices[: args.max_samples]
-    ds = NeighFormerPARDataset(
-        data_path,
-        indices,
-        cfg["dataset"],
-        cfg["feature_mode"],
-        args.split,
-        acc_token_size=int(cfg["acc_token_size"]),
-        velocity_bins=int(cfg["velocity_bins"]),
-    )
+    use_multiagent = bool(args.multiagent or cfg.get("multiagent"))
+    if use_multiagent:
+        data_path = multiagent_split_dir(data_root, cfg["dataset"], args.split)
+        indices = multiagent_indices(data_path, args.max_samples)
+        ds = MultiAgentPARDataset(
+            data_path,
+            cfg["dataset"],
+            cfg["feature_mode"],
+            args.split,
+            indices=indices,
+            acc_token_size=int(cfg["acc_token_size"]),
+            velocity_bins=int(cfg["velocity_bins"]),
+            use_importance=bool(cfg.get("use_importance")),
+        )
+    else:
+        data_path = dataset_dir(data_root, cfg["dataset"])
+        indices = np.load(split_indices_path(data_root, cfg["dataset"], args.split))
+        if args.max_samples is not None:
+            indices = indices[: args.max_samples]
+        ds = NeighFormerPARDataset(
+            data_path,
+            indices,
+            cfg["dataset"],
+            cfg["feature_mode"],
+            args.split,
+            acc_token_size=int(cfg["acc_token_size"]),
+            velocity_bins=int(cfg["velocity_bins"]),
+            use_importance=bool(cfg.get("use_importance")),
+        )
     batch_size = args.batch_size or int(cfg["batch_size"])
     num_workers = args.num_workers if args.num_workers is not None else int(cfg["num_workers"])
     loader = DataLoader(ds, batch_size=batch_size, shuffle=False, num_workers=num_workers, persistent_workers=num_workers > 0)
@@ -139,6 +158,8 @@ def main(argv: list[str] | None = None) -> int:
     print(f"[INFO] Checkpoint : {ckpt_path}  (epoch {ckpt.get('epoch', '?')})")
     print(f"[INFO] Upstream   : {upstream_dir}")
     print(f"[INFO] Dataset    : {args.split} split  n={len(ds):,}  {cfg['dataset']} {cfg['feature_mode']}")
+    print(f"[INFO] Source     : {'multiagent' if use_multiagent else 'single-agent'}")
+    print(f"[INFO] Importance : {bool(cfg.get('use_importance'))}")
     gpu = f"  ({torch.cuda.get_device_name(0)})" if device.type == "cuda" else ""
     print(f"[INFO] Device     : {device}{gpu}")
 
@@ -175,4 +196,3 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

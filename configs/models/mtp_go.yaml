@@ -7,6 +7,12 @@ adapter_dir: "adapters/mtp_go"
 # Empty -> mtp_go_<dataset>_<feature_mode>.
 exp_tag: ""
 
+# null preserves the existing seed-sweep convention:
+#   feature_mode=baseline -> native graph only
+#   feature_mode=I/dimI   -> native graph + scalar edge I only
+# Set explicitly to false/true to decouple the run label from the input.
+use_importance:
+
 # =========================
 # DATA
 # Relative paths resolve against the sota_experiments root.
@@ -24,9 +30,9 @@ input:
   uses_map: false
   ego_channels: 6
   neighbor_baseline_channels: 6
-  neighbor_I_channels: 7
-  raw_neighbor_channels: 10
-  neighbor_dimI_channels: 8
+  neighbor_I_channels: 6
+  raw_neighbor_channels: 13
+  neighbor_dimI_channels: 6
 
 # =========================
 # TRAIN
@@ -83,6 +89,7 @@ smoke:
 
 notes:
   - "Upstream model code is imported from external/mtp_go (symlink or clone of westny/mtp-go)."
+  - "use_importance adds only scalar I as a second edge feature on multi-agent graphs; node features stay native 6-D."
   - "The adapter defaults to --mode smoke; pass --mode full to start real training."
   - "batch_size 1024 + lr 1e-4 is upstream's highD pairing and ~6x faster than 128."
   - "exiD needs splits/*_indices.npy; generate them with neighformer/data/exiD/split.py."

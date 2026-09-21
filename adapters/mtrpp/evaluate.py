@@ -20,6 +20,7 @@ from adapters.common import dataset_dir, split_indices_path  # noqa: E402
 from adapters.multiagent_common import multiagent_indices, multiagent_split_dir  # noqa: E402
 from adapters.mtrpp.dataset import NeighFormerMTRDataset, build_intention_points_from_data, processed_root  # noqa: E402
 from adapters.mtrpp.multiagent_dataset import MultiAgentMTRDataset, build_intention_points_from_multiagent  # noqa: E402
+from adapters.mtrpp.mtrpp_model import MTRPPMotionTransformer  # noqa: E402
 from adapters.mtrpp.train import (  # noqa: E402
     build_builder_kwargs,
     format_path_template,
@@ -29,7 +30,7 @@ from adapters.mtrpp.train import (  # noqa: E402
     resolve_path,
     to_attrdict,
 )
-from adapters.mtrpp.upstream import import_motion_transformer  # noqa: E402
+from adapters.mtrpp.upstream import import_motion_transformer, using_cuda_op_stubs  # noqa: E402
 from adapters.mtp_go.metrics import (  # noqa: E402
     MetricAccumulator,
     SampleMetaLookup,
@@ -94,9 +95,18 @@ def run_evaluate(model, loader, device, cfg: dict[str, Any], labels: SampleMetaL
             batch = move_batch_to_device(raw, device)
             out = model(batch)
             pred, target, all_modes = prediction_tensors(out)
-            sample_indices = raw["input_dict"]["sample_index"].detach().cpu().numpy().reshape(-1)
+            if out["pred_scores"].ndim == 3:
+                focal_mask = out["input_dict"]["focal_mask"].bool()
+                valid_mask = out["input_dict"]["focal_gt_mask"].bool()[focal_mask]
+                sample_raw = raw["input_dict"]["sample_index"].detach().cpu()
+                sample_indices = torch.repeat_interleave(
+                    sample_raw,
+                    torch.as_tensor(raw["batch_sample_count"], dtype=torch.long),
+                ).numpy().reshape(-1)
+            else:
+                sample_indices = raw["input_dict"]["sample_index"].detach().cpu().numpy().reshape(-1)
+                valid_mask = out["input_dict"]["center_gt_trajs_mask"].bool()
             label_rows = labels.lookup(sample_indices) if labels is not None and labels.enabled else None
-            valid_mask = out["input_dict"]["center_gt_trajs_mask"].bool()
             acc.update(pred, target, all_modes=all_modes, valid_mask=valid_mask, labels=label_rows)
             scene_acc.update(all_modes, target, valid_mask, sample_indices)
     return acc, scene_acc
@@ -114,7 +124,13 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit(f"Checkpoint not found: {ckpt_path}")
     ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
     cfg: dict[str, Any] = ckpt["cfg"]
+    architecture = ckpt.get("metadata", {}).get("architecture", cfg.get("architecture", "mtr"))
+    cfg["architecture"] = architecture
     model_cfg = to_attrdict(ckpt["model_cfg"])
+    if architecture == "mtrpp" and cfg.get("use_importance"):
+        raise SystemExit("MTR++ importance integration has not been enabled yet.")
+    if cfg.get("use_importance") and cfg.get("feature_mode") != "baseline":
+        raise SystemExit("Importance-enabled MTR checkpoints must use feature_mode=baseline.")
     upstream_dir = args.upstream_dir or cfg.get("upstream_dir")
     force_global = bool(args.global_attention_fallback or cfg.get("global_attention_fallback", False))
     device = torch.device(args.device) if args.device else torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -168,6 +184,8 @@ def main(argv: list[str] | None = None) -> int:
         upstream_dir,
         global_attention_fallback=force_global,
     )
+    if cfg.get("use_importance") and (force_global or using_cuda_op_stubs()):
+        raise SystemExit("Importance-enabled MTR requires local attention support.")
     mtr_global_cfg.ROOT_DIR = EXPERIMENT_ROOT
     if use_multiagent:
         split_path = multiagent_split_dir(data_root, cfg["dataset"], args.split)
@@ -181,7 +199,15 @@ def main(argv: list[str] | None = None) -> int:
     if args.num_workers is not None:
         cfg["num_workers"] = args.num_workers
     if use_multiagent:
-        ds = MultiAgentMTRDataset(split_path, cfg["dataset"], args.split, indices=indices, **build_builder_kwargs(cfg))
+        ds = MultiAgentMTRDataset(
+            split_path,
+            cfg["dataset"],
+            args.split,
+            indices=indices,
+            target_agent_mode=architecture != "mtrpp",
+            scene_first_mtrpp=architecture == "mtrpp",
+            **build_builder_kwargs(cfg),
+        )
     else:
         ds = NeighFormerMTRDataset(
             data_path,
@@ -194,11 +220,13 @@ def main(argv: list[str] | None = None) -> int:
             reuse_processed=bool(args.reuse_processed or cfg.get("reuse_processed", False)),
         )
     loader = make_loader(ds, cfg, shuffle=False)
-    model = MotionTransformer(config=model_cfg).to(device)
+    model_cls = MTRPPMotionTransformer if architecture == "mtrpp" else MotionTransformer
+    model = model_cls(config=model_cfg).to(device)
     model.load_state_dict(ckpt["model_state"])
     print(f"[INFO] Checkpoint : {ckpt_path}  (epoch {ckpt.get('epoch', '?')})")
     print(f"[INFO] Upstream   : {resolved_upstream}")
     print(f"[INFO] Dataset    : {args.split} split  n={len(ds):,}  {cfg['dataset']} {cfg['feature_mode']}")
+    print(f"[INFO] Architecture: {architecture}")
     print(f"[INFO] Source     : {'multiagent' if use_multiagent else 'single-agent'}")
     gpu = f"  ({torch.cuda.get_device_name(0)})" if device.type == "cuda" else ""
     print(f"[INFO] Device     : {device}{gpu}")

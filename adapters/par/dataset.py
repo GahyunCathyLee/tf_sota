@@ -3,9 +3,11 @@
 PAR's car task is an autoregressive token model over xy trajectories.  When
 ``data/par/preprocess.py`` has produced fixed-ID neighbour futures, this adapter
 uses multi-agent future tokens for the training loss.  It falls back to ego-only
-future loss for canonical NeighFormer arrays without ``y_nb.npy``.  In ``dimI``
-mode the extra neighbour ``dim`` and ``I`` channels are kept as continuous
-side-channel features attached to the token embeddings.
+future loss for canonical NeighFormer arrays without ``y_nb.npy``.
+
+The native PAR input is the trajectory-token stream.  When ``use_importance`` is
+enabled, only the scalar interaction importance ``I`` is added as a continuous
+side-channel embedding; the other highD/exiD neighbour channels remain unused.
 """
 
 from __future__ import annotations
@@ -17,9 +19,7 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 
-from adapters.common import feature_mode_indices, feature_mode_names
-
-EGO_EXTRA_FILL = -1.0
+IMPORTANCE_CHANNEL = 12
 
 
 def get_bins_first_order(num_bins: int = 128, range_min: float = -18.0, range_max: float = 18.0) -> np.ndarray:
@@ -140,14 +140,14 @@ class NeighFormerPARDataset(Dataset):
         acc_token_size: int = 13,
         velocity_bins: int = 128,
         max_neighbors: int | None = None,
+        use_importance: bool = False,
     ) -> None:
         self.data_dir = Path(data_dir)
         self.sample_indices = np.asarray(indices, dtype=np.int64)
         self.dataset_name = dataset_name
         self.feature_mode = feature_mode
+        self.use_importance = bool(use_importance)
         self.split = split
-        self.nb_feature_indices = np.asarray(feature_mode_indices(feature_mode), dtype=np.int64)
-        self.nb_feature_names = feature_mode_names(feature_mode)
         self.acc_token_size = int(acc_token_size)
         self.pad_index = self.acc_token_size * self.acc_token_size
         self.bins = get_bins_first_order(int(velocity_bins))
@@ -166,7 +166,7 @@ class NeighFormerPARDataset(Dataset):
         self.ego_agent_id = self.num_agents - 1
         self.token_steps = self.history_len + self.future_len - 2
         self.obs_token_steps = self.history_len - 2
-        self.side_dim = 2 if self.feature_mode == "dimI" else 0
+        self.side_dim = 1 if self.use_importance else 0
         self.has_neighbor_future = (self.data_dir / "y_nb.npy").exists() and (self.data_dir / "y_nb_mask.npy").exists()
         self.has_fixed_neighbor_history = (
             (self.data_dir / "x_nb_abs.npy").exists()
@@ -175,11 +175,8 @@ class NeighFormerPARDataset(Dataset):
         self.has_neighbor_attrs = (self.data_dir / "nb_attr.npy").exists() and (self.data_dir / "nb_attr_mask.npy").exists()
         if int(x_ego.shape[2]) != 6:
             raise ValueError(f"Expected x_ego[..., 6], got {x_ego.shape}")
-        if int(x_nb.shape[3]) < int(self.nb_feature_indices.max()) + 1:
-            raise ValueError(
-                f"x_nb has {x_nb.shape[3]} channels; {feature_mode} needs index "
-                f"{int(self.nb_feature_indices.max())}"
-            )
+        if self.use_importance and int(x_nb.shape[3]) <= IMPORTANCE_CHANNEL:
+            raise ValueError(f"use_importance=true requires x_nb[..., {IMPORTANCE_CHANNEL}], got {x_nb.shape}")
         if self.history_len < 3:
             raise ValueError("PAR acceleration tokens require at least 3 history positions")
 
@@ -266,26 +263,18 @@ class NeighFormerPARDataset(Dataset):
         else:
             loss_mask = (agent_ids == self.ego_agent_id) & future_mask & (tokens != self.pad_index)
 
-        if self.side_dim:
-            side = np.zeros((self.token_steps, self.num_agents, self.side_dim), dtype=np.float32)
-            side[:, self.ego_agent_id, :] = EGO_EXTRA_FILL
-            if self.has_neighbor_attrs and "nb_attr" in arrays and "nb_attr_mask" in arrays:
-                attr = np.asarray(arrays["nb_attr"][real_idx], dtype=np.float32)
-                attr_mask = np.asarray(arrays["nb_attr_mask"][real_idx], dtype=bool)
-                for slot in range(min(self.max_neighbors, attr.shape[0])):
-                    if attr_mask[slot]:
-                        side[:, slot, :] = attr[slot]
-            else:
-                for slot in range(min(self.max_neighbors, self.raw_max_neighbors)):
-                    last_attr = None
-                    for tok_t in range(self.obs_token_steps):
-                        src_t = min(tok_t + 2, self.history_len - 1)
-                        if mask[src_t, slot]:
-                            last_attr = nb[src_t, slot, 8:10]
-                            side[tok_t, slot, :] = last_attr
-                    if last_attr is not None:
-                        side[self.obs_token_steps :, slot, :] = last_attr
-            side_flat = side.reshape(-1, self.side_dim)
+        if self.use_importance:
+            side = np.zeros((self.token_steps, self.num_agents, 1), dtype=np.float32)
+            for slot in range(min(self.max_neighbors, self.raw_max_neighbors)):
+                last_i = 0.0
+                for tok_t in range(self.obs_token_steps):
+                    src_t = min(tok_t + 2, self.history_len - 1)
+                    if mask[src_t, slot]:
+                        last_i = float(nb[src_t, slot, IMPORTANCE_CHANNEL])
+                        side[tok_t, slot, 0] = last_i
+                side[self.obs_token_steps :, slot, 0] = last_i
+            side_flat = side.reshape(-1, 1)
+            side_flat[tokens == self.pad_index, 0] = 0.0
         else:
             side_flat = np.zeros((tokens.shape[0], 0), dtype=np.float32)
 
@@ -316,9 +305,10 @@ class NeighFormerPARDataset(Dataset):
             "observed_token_steps": self.obs_token_steps,
             "vocab_size": self.pad_index + 1,
             "side_channel_dim": self.side_dim,
-            "neighbor_indices": [int(v) for v in self.nb_feature_indices],
-            "neighbor_names": self.nb_feature_names,
-            "dimI_mapping": "continuous side-channel embedding" if self.side_dim else "disabled in baseline",
+            "legacy_feature_mode": self.feature_mode,
+            "use_importance": self.use_importance,
+            "consumed_continuous_side_channels": ["I"] if self.use_importance else [],
+            "excluded_proposed_channels": ["lc_state", "lit", "lis", "gate", "I_x", "I_y", "dim"],
             "neighbor_future_used": self.has_neighbor_future,
             "fixed_neighbor_history_used": self.has_fixed_neighbor_history,
             "neighbor_attrs_used": self.has_neighbor_attrs,
@@ -333,14 +323,20 @@ class NeighFormerPARDataset(Dataset):
             real_idx = int(self.sample_indices[j])
             mask = np.asarray(arrays["nb_mask"][real_idx], dtype=bool)
             nb = np.asarray(arrays["x_nb"][real_idx], dtype=np.float32)
-            if mask.any():
-                rows.append(nb[mask][:, self.nb_feature_indices])
+            if self.use_importance and mask.any():
+                rows.append(nb[mask][:, [IMPORTANCE_CHANNEL]])
         if not rows:
-            return {}
+            return {
+                "samples_inspected": n,
+                "consumed_features": ["trajectory_tokens"] + (["I"] if self.use_importance else []),
+                "excluded_proposed_channels": ["lc_state", "lit", "lis", "gate", "I_x", "I_y", "dim"],
+            }
         stacked = np.concatenate(rows, axis=0)
         return {
             "samples_inspected": n,
             "neighbor_rows": int(stacked.shape[0]),
+            "consumed_features": ["trajectory_tokens", "I"],
+            "excluded_proposed_channels": ["lc_state", "lit", "lis", "gate", "I_x", "I_y", "dim"],
             "per_channel": {
                 name: {
                     "min": float(stacked[:, i].min()),
@@ -348,6 +344,6 @@ class NeighFormerPARDataset(Dataset):
                     "mean": float(stacked[:, i].mean()),
                     "nonzero_fraction": float((stacked[:, i] != 0).mean()),
                 }
-                for i, name in enumerate(self.nb_feature_names)
+                for i, name in enumerate(["I"])
             },
         }

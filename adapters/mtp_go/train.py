@@ -38,18 +38,17 @@ from adapters.common import (  # noqa: E402
     DatasetSpec,
     FEATURE_MODES,
     dataset_dir,
-    feature_mode_indices,
-    feature_mode_names,
     split_indices_path,
     validate_dataset_spec,
 )
 from adapters.mtp_go.dataset import (  # noqa: E402
-    EGO_EXTRA_FILL,
     NeighFormerGraphDataset,
     estimate_dt,
 )
+from adapters.mtp_go.encoder import build_gru_gnn_encoder  # noqa: E402
 from adapters.mtp_go.lit_module import evaluate, make_lit_module_class  # noqa: E402
 from adapters.mtp_go.metrics import print_metrics  # noqa: E402
+from adapters.mtp_go.multiagent_dataset import MultiAgentMTPGoDataset  # noqa: E402
 from adapters.mtp_go.upstream import (  # noqa: E402
     ROTATIONAL_MOTION_MODELS,
     add_upstream_to_path,
@@ -57,6 +56,7 @@ from adapters.mtp_go.upstream import (  # noqa: E402
     resolve_upstream_dir,
     upstream_commit,
 )
+from adapters.multiagent_common import multiagent_indices, multiagent_split_dir  # noqa: E402
 
 LOGGER = logging.getLogger("mtp_go_adapter")
 
@@ -97,6 +97,8 @@ DEFAULTS: dict[str, Any] = {
     "tensorboard_dir": "",
     "exp_tag": "",
     "scenario_labels": "",
+    "multiagent": False,
+    "use_importance": None,
     # A config may pin the run it describes; --dataset / --feature-mode override.
     "dataset": "",
     "feature_mode": "",
@@ -152,6 +154,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--full", action="store_true", help="Alias for --mode full.")
     p.add_argument("--check-data", action="store_true",
                    help="Load arrays, build one scene graph, write a data report, then exit.")
+    p.add_argument("--multiagent", action="store_true",
+                   help="Use data/{dataset}_multiagent/{split}_full scene arrays")
+    group = p.add_mutually_exclusive_group()
+    group.add_argument("--use-importance", dest="use_importance", action="store_true")
+    group.add_argument("--no-use-importance", dest="use_importance", action="store_false")
+    p.set_defaults(use_importance=None)
 
     p.add_argument("--epochs", type=int)
     p.add_argument("--batch-size", type=int)
@@ -359,6 +367,10 @@ def apply_overrides(cfg: dict[str, Any], args: argparse.Namespace) -> dict[str, 
         value = getattr(args, cli_key, None)
         if value is not None:
             cfg[cfg_key] = value
+    if args.multiagent:
+        cfg["multiagent"] = True
+    if args.use_importance is not None:
+        cfg["use_importance"] = bool(args.use_importance)
 
     # `epochs` is how long the Trainer runs; `schedule_epochs` is the horizon
     # upstream's EWTA -> EWTA+NLL -> NLL and teacher-forcing schedules are defined
@@ -559,29 +571,28 @@ def environment_info(upstream_dir: Path) -> dict[str, Any]:
 
 
 def feature_mapping(feature_mode: str) -> dict[str, Any]:
-    nb_idx = feature_mode_indices(feature_mode)
-    nb_names = feature_mode_names(feature_mode)
-    node_names = ["x|dx", "y|dy", "vx|dvx", "vy|dvy", "ax|dax", "ay|day"] + nb_names[6:]
     return {
         "ego_node": {
             "source": "x_ego.npy",
             "channels": ["x", "y", "xVelocity", "yVelocity", "xAcceleration", "yAcceleration"],
             "frame": "relative to ego position at the last history step",
-            "extra_channel_fill": EGO_EXTRA_FILL if len(nb_idx) > 6 else None,
+            "extra_channel_fill": None,
         },
         "neighbor_nodes": {
             "source": "x_nb.npy",
-            "selected_indices": nb_idx,
-            "channels": nb_names,
+            "selected_indices": [0, 1, 2, 3, 4, 5],
+            "channels": ["dx", "dy", "dvx", "dvy", "dax", "day"],
             "frame": "ego-relative (dx, dy, dvx, ...)",
         },
-        "node_feature_layout": node_names,
-        "node_feature_dim": len(nb_idx),
+        "node_feature_layout": ["x|dx", "y|dy", "vx|dvx", "vy|dvy", "ax|dax", "ay|day"],
+        "node_feature_dim": 6,
         "edges": "per history step, fully connected + self loops over present nodes; "
-                 "edge feature = Euclidean distance in the ego-relative frame",
+                 "edge feature = Euclidean distance in the ego-relative frame; +I appends scalar I_ij",
         "future_edges": "last observed history graph reused for every future step",
         "targets": "ego target from y.npy (+ y_vel.npy, y_acc.npy); neighbor targets from "
                    "y_nb.npy/y_nb_mask.npy when those arrays are present",
+        "legacy_feature_mode": feature_mode,
+        "excluded_proposed_node_channels": ["lc_state", "lit", "lis", "gate", "I_x", "I_y", "dim", "I"],
     }
 
 
@@ -595,14 +606,47 @@ def build_datasets(
     for split in SPLITS:
         limit = cfg["max_train_samples"] if split == "train" else cfg["max_eval_samples"]
         idx = subsample(indices[split], limit, cfg["seed"])
-        datasets[split] = NeighFormerGraphDataset(data_dir, idx, feature_mode, split=split)
+        datasets[split] = NeighFormerGraphDataset(
+            data_dir,
+            idx,
+            feature_mode,
+            split=split,
+            use_importance=bool(cfg.get("use_importance")),
+        )
     return datasets
+
+
+def build_multiagent_datasets(
+    data_root: Path,
+    dataset: str,
+    feature_mode: str,
+    cfg: dict[str, Any],
+) -> tuple[dict[str, MultiAgentMTPGoDataset], dict[str, Any]]:
+    datasets: dict[str, MultiAgentMTPGoDataset] = {}
+    split_info: dict[str, Any] = {"source": "multiagent_full_dirs", "paths": {}, "sizes": {}}
+    for split in SPLITS:
+        split_dir = multiagent_split_dir(data_root, dataset, split)
+        limit = cfg["max_train_samples"] if split == "train" else cfg["max_eval_samples"]
+        idx = multiagent_indices(split_dir, limit)
+        datasets[split] = MultiAgentMTPGoDataset(
+            split_dir,
+            dataset,
+            feature_mode,
+            split,
+            indices=idx,
+            use_importance=bool(cfg.get("use_importance")),
+        )
+        split_info["paths"][split] = str(split_dir)
+        split_info["sizes"][split] = int(idx.size)
+    return datasets, split_info
 
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     cfg = apply_overrides(load_config(args.config), args)
     resolve_run_target(cfg, args)
+    if cfg.get("use_importance") is None:
+        cfg["use_importance"] = args.feature_mode != "baseline"
     cfg = resolve_paths(cfg, args)
 
     output_dir: Path = cfg["output_dir"]
@@ -612,15 +656,21 @@ def main(argv: list[str] | None = None) -> int:
     command = " ".join(shlex.quote(a) for a in [sys.executable, *sys.argv])
 
     data_root: Path = cfg["data_root"]
-    data_dir = dataset_dir(data_root, args.dataset)
-    spec = DatasetSpec(
-        dataset=args.dataset,
-        feature_mode=args.feature_mode,
-        split="train",
-        data_dir=data_dir,
-        split_indices_path=split_indices_path(data_root, args.dataset, "train"),
+    use_multiagent = bool(cfg.get("multiagent"))
+    data_dir = (
+        multiagent_split_dir(data_root, args.dataset, "train")
+        if use_multiagent
+        else dataset_dir(data_root, args.dataset)
     )
-    validate_dataset_spec(spec)
+    if not use_multiagent:
+        spec = DatasetSpec(
+            dataset=args.dataset,
+            feature_mode=args.feature_mode,
+            split="train",
+            data_dir=data_dir,
+            split_indices_path=split_indices_path(data_root, args.dataset, "train"),
+        )
+        validate_dataset_spec(spec)
 
     upstream_dir = resolve_upstream_dir(args.upstream_dir)
     add_upstream_to_path(upstream_dir)
@@ -628,17 +678,23 @@ def main(argv: list[str] | None = None) -> int:
     LOGGER.info("mode          : %s", cfg["mode"])
     LOGGER.info("exp tag       : %s", cfg["exp_tag"])
     LOGGER.info("dataset       : %s (%s)", args.dataset, data_dir)
-    LOGGER.info("feature mode  : %s -> %d node channels", args.feature_mode,
-                len(feature_mode_indices(args.feature_mode)))
+    LOGGER.info("source        : %s", "multiagent" if use_multiagent else "single-agent")
+    LOGGER.info("feature mode  : %s", args.feature_mode)
+    LOGGER.info("use_importance: %s", bool(cfg.get("use_importance")))
     LOGGER.info("upstream      : %s", upstream_dir)
     LOGGER.info("output dir    : %s", output_dir)
     LOGGER.info("ckpt dir      : %s", ckpt_dir)
     if cfg["use_tensorboard"]:
         LOGGER.info("tensorboard   : %s", cfg["tensorboard_dir"] / cfg["exp_tag"])
+    if bool(cfg.get("use_importance")) and not use_multiagent:
+        raise SystemExit(
+            "MTP-GO use_importance=true requires --multiagent / multiagent: true because "
+            "canonical arrays do not contain arbitrary pairwise graph-edge I_ij."
+        )
 
     # ---------------------------------------------------------------- dt check
     dt = float(cfg["dt"])
-    dt_est = estimate_dt(data_dir)
+    dt_est = None if use_multiagent else estimate_dt(data_dir)
     if dt_est is not None:
         LOGGER.info("dt configured=%.4fs, estimated from data=%.4fs", dt, dt_est)
         if abs(dt_est - dt) / dt > 0.15:
@@ -648,16 +704,18 @@ def main(argv: list[str] | None = None) -> int:
                 "configured dt; set `dt` in the config to match the data.", dt, dt_est
             )
 
-    n_total = int(np.load(data_dir / "x_ego.npy", mmap_mode="r").shape[0])
-    indices, split_info = resolve_splits(
-        data_root, args.dataset, n_total, args.split_fallback, probe_only=args.check_data
-    )
-    if "warning" in split_info:
-        LOGGER.warning(split_info["warning"])
-    if split_info["source"] == "unresolved":
-        LOGGER.warning("Split index files are missing: %s", ", ".join(split_info["missing_paths"]))
-
-    datasets = build_datasets(data_dir, indices, args.feature_mode, cfg)
+    if use_multiagent:
+        datasets, split_info = build_multiagent_datasets(data_root, args.dataset, args.feature_mode, cfg)
+    else:
+        n_total = int(np.load(data_dir / "x_ego.npy", mmap_mode="r").shape[0])
+        indices, split_info = resolve_splits(
+            data_root, args.dataset, n_total, args.split_fallback, probe_only=args.check_data
+        )
+        if "warning" in split_info:
+            LOGGER.warning(split_info["warning"])
+        if split_info["source"] == "unresolved":
+            LOGGER.warning("Split index files are missing: %s", ", ".join(split_info["missing_paths"]))
+        datasets = build_datasets(data_dir, indices, args.feature_mode, cfg)
     for split, ds in datasets.items():
         LOGGER.info("split %-5s : %d samples", split, ds.len())
 
@@ -666,6 +724,7 @@ def main(argv: list[str] | None = None) -> int:
         "dataset": args.dataset,
         "feature_mode": args.feature_mode,
         "data_dir": str(data_dir),
+        "source": "multiagent" if use_multiagent else "single-agent",
         "splits": split_info,
         "feature_mapping": feature_mapping(args.feature_mode),
         "arrays": {s: datasets[s].describe() for s in SPLITS},
@@ -679,6 +738,7 @@ def main(argv: list[str] | None = None) -> int:
             "num_nodes": int(probe.num_nodes),
             "x": list(probe.x.shape),
             "y": list(probe.y.shape),
+            "edge_features_last_history_step": list(probe.edge_features[-1].shape),
             "history_graphs": len(probe.edge_index),
             "future_graphs": len(probe.tar_edge_index),
             "edges_last_history_step": int(probe.edge_index[-1].shape[1]),
@@ -701,7 +761,7 @@ def main(argv: list[str] | None = None) -> int:
     from torch_geometric.loader import DataLoader
 
     from base_mdn import LitEncoderDecoder  # upstream
-    from models.gru_gnn import GRUGNNDecoder, GRUGNNEncoder  # upstream
+    from models.gru_gnn import GRUGNNDecoder  # upstream
 
     seed_everything(int(cfg["seed"]), workers=True)
 
@@ -719,14 +779,18 @@ def main(argv: list[str] | None = None) -> int:
     hp.epochs = int(cfg["schedule_epochs"])  # loss/teacher-forcing schedule horizon
     hp.dataset_name = args.dataset
     hp.feature_mode = args.feature_mode
+    hp.multiagent = use_multiagent
+    hp.use_importance = bool(cfg.get("use_importance"))
     hp.upstream_dir = str(upstream_dir)
 
-    n_features = len(feature_mode_indices(args.feature_mode))
+    n_features = int(datasets["train"].n_node_features)
+    edge_feature_dim = int(getattr(datasets["train"], "edge_feature_dim", 1))
+    hp.edge_feature_dim = edge_feature_dim
     static_f_dim = 2 * int(bool(cfg["n_ode_static"]))
     motion_model = build_motion_model(hp, dt, static_f_dim)
     max_length = datasets["train"].history_len + 1  # encoder emits T_h + 1 states
 
-    encoder = GRUGNNEncoder(
+    encoder = build_gru_gnn_encoder(
         input_size=n_features,
         hidden_size=cfg["hidden_size"],
         n_mixtures=motion_model.mixtures,
@@ -736,6 +800,7 @@ def main(argv: list[str] | None = None) -> int:
         static_f_dim=static_f_dim,
         init_static=cfg["init_static"],
         use_edge_features=cfg["use_edge_features"],
+        edge_feature_dim=edge_feature_dim,
     )
     decoder = GRUGNNDecoder(
         motion_model,
@@ -753,6 +818,7 @@ def main(argv: list[str] | None = None) -> int:
                 cfg["motion_model"], cfg["gnn_layer"], n_params)
     LOGGER.info("input size    : %d node channels, n_states=%d, mixtures=%d",
                 n_features, motion_model.n_states, motion_model.mixtures)
+    LOGGER.info("edge features : %d (%s)", edge_feature_dim, "distance+I" if hp.use_importance else "distance")
 
     n_workers = int(cfg["n_workers"])
     loader_kwargs = dict(num_workers=n_workers, pin_memory=torch.cuda.is_available())
@@ -870,6 +936,7 @@ def main(argv: list[str] | None = None) -> int:
             "n_states": int(motion_model.n_states),
             "n_mixtures": int(motion_model.mixtures),
             "input_size": n_features,
+            "edge_feature_dim": edge_feature_dim,
             "max_length": max_length,
             "static_f_dim": static_f_dim,
             "num_parameters": int(n_params),

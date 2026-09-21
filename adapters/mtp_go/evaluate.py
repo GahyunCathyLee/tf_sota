@@ -31,8 +31,9 @@ ADAPTER_DIR = Path(__file__).resolve().parent
 EXPERIMENT_ROOT = ADAPTER_DIR.parents[1]
 sys.path.insert(0, str(EXPERIMENT_ROOT))
 
-from adapters.common import dataset_dir, feature_mode_indices, print_hparam_summary, split_indices_path  # noqa: E402
+from adapters.common import dataset_dir, print_hparam_summary, split_indices_path  # noqa: E402
 from adapters.mtp_go.dataset import NeighFormerGraphDataset  # noqa: E402
+from adapters.mtp_go.encoder import build_gru_gnn_encoder  # noqa: E402
 from adapters.mtp_go.lit_module import evaluate as run_evaluate  # noqa: E402
 from adapters.mtp_go.lit_module import make_lit_module_class  # noqa: E402
 from adapters.mtp_go.metrics import (  # noqa: E402
@@ -42,7 +43,9 @@ from adapters.mtp_go.metrics import (  # noqa: E402
     print_metrics,
     print_scenario_results,
 )
+from adapters.mtp_go.multiagent_dataset import MultiAgentMTPGoDataset  # noqa: E402
 from adapters.mtp_go.train import resolve_path, to_plain  # noqa: E402
+from adapters.multiagent_common import multiagent_indices, multiagent_split_dir  # noqa: E402
 from adapters.mtp_go.upstream import (  # noqa: E402
     add_upstream_to_path,
     build_motion_model,
@@ -68,6 +71,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--num-workers", type=int, help="Override the checkpoint's num_workers")
     p.add_argument("--device", type=str, help="cuda | cpu (default: cuda if available)")
     p.add_argument("--max-samples", type=int, help="Evaluate only the first N samples")
+    p.add_argument("--multiagent", action="store_true",
+                   help="Use data/{dataset}_multiagent/{split}_full scene arrays")
     p.add_argument("--measure-time", action="store_true",
                    help=f"Measure single-sample inference latency "
                         f"({LATENCY_WARMUP:,} warmup + {LATENCY_ITERS:,} iters)")
@@ -153,13 +158,19 @@ def load_checkpoint_config(ckpt_path: Path) -> tuple[dict, SimpleNamespace]:
     return ckpt, hp
 
 
-def build_model_from_config(hp: SimpleNamespace, n_features: int, history_len: int, dt: float):
+def build_model_from_config(
+    hp: SimpleNamespace,
+    n_features: int,
+    history_len: int,
+    dt: float,
+    edge_feature_dim: int,
+):
     from base_mdn import LitEncoderDecoder  # upstream
-    from models.gru_gnn import GRUGNNDecoder, GRUGNNEncoder  # upstream
+    from models.gru_gnn import GRUGNNDecoder  # upstream
 
     static_f_dim = 2 * int(bool(hp.n_ode_static))
     motion_model = build_motion_model(hp, dt, static_f_dim)
-    encoder = GRUGNNEncoder(
+    encoder = build_gru_gnn_encoder(
         input_size=n_features,
         hidden_size=hp.hidden_size,
         n_mixtures=motion_model.mixtures,
@@ -169,6 +180,7 @@ def build_model_from_config(hp: SimpleNamespace, n_features: int, history_len: i
         static_f_dim=static_f_dim,
         init_static=hp.init_static,
         use_edge_features=hp.use_edge_features,
+        edge_feature_dim=edge_feature_dim,
     )
     decoder = GRUGNNDecoder(
         motion_model,
@@ -211,27 +223,55 @@ def main(argv: list[str] | None = None) -> int:
 
     # ── Data ──────────────────────────────────────────────────────────────────
     data_root = resolve_path(args.data_root) if args.data_root else resolve_path(hp.data_root)
-    data_dir = dataset_dir(data_root, dataset_name)
-    if not data_dir.exists():
+    use_multiagent = bool(args.multiagent or getattr(hp, "multiagent", False))
+    use_importance = bool(getattr(hp, "use_importance", False))
+    if use_importance and not use_multiagent:
         raise SystemExit(
-            f"Data directory not found: {data_dir}\n"
-            f"Pass --data-root pointing at the directory that holds "
-            f"{dataset_name}/dimI and {dataset_name}/splits."
+            "This checkpoint expects MTP-GO edge-level I, which requires multi-agent arrays."
         )
-    split_file = split_indices_path(data_root, dataset_name, args.split)
-    if not split_file.exists():
-        raise SystemExit(f"Split index file not found: {split_file}")
-    split_idx = np.load(split_file).astype(np.int64)
-    if args.max_samples:
-        split_idx = split_idx[: args.max_samples]
-
-    ds = NeighFormerGraphDataset(data_dir, split_idx, feature_mode, split=args.split)
-    n_features = len(feature_mode_indices(feature_mode))
+    if use_multiagent:
+        data_dir = multiagent_split_dir(data_root, dataset_name, args.split)
+        if not data_dir.exists():
+            raise SystemExit(f"Multi-agent split directory not found: {data_dir}")
+        split_idx = multiagent_indices(data_dir, args.max_samples)
+        ds = MultiAgentMTPGoDataset(
+            data_dir,
+            dataset_name,
+            feature_mode,
+            args.split,
+            indices=split_idx,
+            use_importance=use_importance,
+        )
+    else:
+        data_dir = dataset_dir(data_root, dataset_name)
+        if not data_dir.exists():
+            raise SystemExit(
+                f"Data directory not found: {data_dir}\n"
+                f"Pass --data-root pointing at the directory that holds "
+                f"{dataset_name}/dimI and {dataset_name}/splits."
+            )
+        split_file = split_indices_path(data_root, dataset_name, args.split)
+        if not split_file.exists():
+            raise SystemExit(f"Split index file not found: {split_file}")
+        split_idx = np.load(split_file).astype(np.int64)
+        if args.max_samples:
+            split_idx = split_idx[: args.max_samples]
+        ds = NeighFormerGraphDataset(
+            data_dir,
+            split_idx,
+            feature_mode,
+            split=args.split,
+            use_importance=use_importance,
+        )
+    n_features = int(ds.n_node_features)
+    edge_feature_dim = int(getattr(ds, "edge_feature_dim", getattr(hp, "edge_feature_dim", 1)))
     print(f"[INFO] Dataset    : {dataset_name}/{feature_mode}  {args.split} split  "
           f"n={ds.len():,}  node_channels={n_features}")
+    print(f"[INFO] Source     : {'multiagent' if use_multiagent else 'single-agent'}")
+    print(f"[INFO] Importance : {use_importance}  edge_channels={edge_feature_dim}")
 
     # ── Model ─────────────────────────────────────────────────────────────────
-    model, motion_model = build_model_from_config(hp, n_features, ds.history_len, dt)
+    model, motion_model = build_model_from_config(hp, n_features, ds.history_len, dt, edge_feature_dim)
     model.load_state_dict(ckpt["state_dict"])
     model.to(device).eval()
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -242,7 +282,7 @@ def main(argv: list[str] | None = None) -> int:
             ("adapter", "MTP-GO"),
             ("dataset", dataset_name),
             ("feature_mode", feature_mode),
-            ("eval_scope", "ego+neighbors" if ds.has_neighbor_future else "ego_only"),
+            ("eval_scope", "scored_agents" if use_multiagent else ("ego+neighbors" if ds.has_neighbor_future else "ego_only")),
             ("checkpoint_epoch", ckpt.get("epoch")),
             ("schedule_epochs", getattr(hp, "epochs", None)),
             ("batch_size", getattr(hp, "batch_size", None)),
@@ -254,6 +294,8 @@ def main(argv: list[str] | None = None) -> int:
             ("dt_seconds", dt),
             ("eval_hz", hz),
             ("node_channels", n_features),
+            ("edge_channels", edge_feature_dim),
+            ("use_importance", use_importance),
             ("hidden_size", getattr(hp, "hidden_size", None)),
             ("gnn_layer", getattr(hp, "gnn_layer", None)),
             ("gnn_layers", getattr(hp, "n_gnn_layers", None)),

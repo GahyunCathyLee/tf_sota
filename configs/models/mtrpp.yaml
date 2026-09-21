@@ -19,6 +19,7 @@ input:
   neighbor_dimI_channels: 8
 
 training:
+  architecture: mtr
   mode: full
   batch_size: 32
   epochs: 100
@@ -31,6 +32,7 @@ training:
   ckpt_dir: "ckpts/mtrpp"
   processed_dir: "processed/mtrpp"
   reuse_processed: false
+  use_importance: false
 
 model:
   d_model: 256
@@ -70,5 +72,5 @@ smoke:
 
 notes:
   - "Uses the official MTR codebase from https://github.com/sshaoshuai/MTR.git."
-  - "NeighFormer arrays are converted to MTR scene-level batch dictionaries; the model architecture is not reimplemented."
+  - "Default architecture=mtr preserves the original center-target adapter path; set architecture=mtrpp for the scene-first symmetric MTR++ baseline."
   - "highD/exiD do not provide HD maps, so the adapter supplies minimal straight-lane MTR map polylines unless a richer map source is added later."

@@ -366,11 +366,19 @@ class NeighFormerMTRDataset:
             "obj_trajs_future_state",
             "obj_trajs_future_mask",
         }
+        pad_2d_keys = {"obj_original_idx"}
+        pad_square_keys = {"agent_importance", "agent_importance_valid", "agent_importance_last_t"}
         concat_np_keys = {"scenario_id", "obj_types", "obj_ids", "center_objects_type", "center_objects_id"}
         for key, val_list in key_to_list.items():
             if key in pad_keys:
                 tensors = [torch.from_numpy(x) for x in val_list]
                 input_dict[key] = _merge_batch_by_padding_2nd_dim(tensors)
+            elif key in pad_2d_keys:
+                tensors = [torch.from_numpy(x) for x in val_list]
+                input_dict[key] = _merge_batch_by_padding_2nd_dim(tensors)
+            elif key in pad_square_keys:
+                tensors = [torch.from_numpy(x) for x in val_list]
+                input_dict[key] = _merge_batch_by_padding_2nd_and_3rd_dim(tensors)
             elif key in concat_np_keys:
                 input_dict[key] = np.concatenate(val_list, axis=0)
             else:
@@ -393,13 +401,27 @@ class NeighFormerMTRDataset:
 def _merge_batch_by_padding_2nd_dim(tensor_list):
     import torch
 
-    assert tensor_list[0].dim() in {3, 4}
+    assert tensor_list[0].dim() in {2, 3, 4}
     max_feat0 = max(x.shape[1] for x in tensor_list)
     _, _, *rest = tensor_list[0].shape
     out = tensor_list[0].new_zeros((sum(x.shape[0] for x in tensor_list), max_feat0, *rest))
     offset = 0
     for tensor in tensor_list:
         out[offset: offset + tensor.shape[0], : tensor.shape[1]] = tensor
+        offset += tensor.shape[0]
+    return out
+
+
+def _merge_batch_by_padding_2nd_and_3rd_dim(tensor_list):
+    import torch
+
+    assert tensor_list[0].dim() == 3
+    max_feat0 = max(x.shape[1] for x in tensor_list)
+    max_feat1 = max(x.shape[2] for x in tensor_list)
+    out = tensor_list[0].new_zeros((sum(x.shape[0] for x in tensor_list), max_feat0, max_feat1))
+    offset = 0
+    for tensor in tensor_list:
+        out[offset: offset + tensor.shape[0], : tensor.shape[1], : tensor.shape[2]] = tensor
         offset += tensor.shape[0]
     return out
 

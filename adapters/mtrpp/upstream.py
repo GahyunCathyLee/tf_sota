@@ -160,7 +160,8 @@ def _patch_encoder_layer_global_kwargs() -> None:
         return
 
     def forward_post(self, src, src_mask=None, src_key_padding_mask=None, pos=None,
-                     index_pair=None, query_batch_cnt=None, key_batch_cnt=None, index_pair_batch=None):
+                     index_pair=None, query_batch_cnt=None, key_batch_cnt=None, index_pair_batch=None,
+                     relative_atten_weights=None):
         q = k = self.with_pos_embed(src, pos)
         if self.use_local_attn:
             src2 = self.self_attn(
@@ -173,6 +174,7 @@ def _patch_encoder_layer_global_kwargs() -> None:
                 query_batch_cnt=query_batch_cnt,
                 key_batch_cnt=key_batch_cnt,
                 index_pair_batch=index_pair_batch,
+                relative_atten_weights=relative_atten_weights,
             )[0]
         else:
             src2 = self.self_attn(q, k, value=src, attn_mask=src_mask, key_padding_mask=src_key_padding_mask)[0]
@@ -183,7 +185,8 @@ def _patch_encoder_layer_global_kwargs() -> None:
         return self.norm2(src)
 
     def forward_pre(self, src, src_mask=None, src_key_padding_mask=None, pos=None,
-                    index_pair=None, query_batch_cnt=None, key_batch_cnt=None, index_pair_batch=None):
+                    index_pair=None, query_batch_cnt=None, key_batch_cnt=None, index_pair_batch=None,
+                    relative_atten_weights=None):
         src2 = self.norm1(src)
         q = k = self.with_pos_embed(src2, pos)
         if self.use_local_attn:
@@ -197,6 +200,7 @@ def _patch_encoder_layer_global_kwargs() -> None:
                 query_batch_cnt=query_batch_cnt,
                 key_batch_cnt=key_batch_cnt,
                 index_pair_batch=index_pair_batch,
+                relative_atten_weights=relative_atten_weights,
             )[0]
         else:
             src2 = self.self_attn(q, k, value=src, attn_mask=src_mask, key_padding_mask=src_key_padding_mask)[0]

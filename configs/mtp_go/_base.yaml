@@ -10,9 +10,9 @@
 #
 # Naming follows neighformer/configs:
 #   <dataset><feature><seed_index>
-#     feature    0 = baseline (dx,dy,dvx,dvy,dax,day)
-#                1 = dimI     (+ dim, I)
-#                2 = I        (+ I)
+#     feature    0 = baseline (native node + distance edge features)
+#                1 = +I       (legacy dimI label; native node + distance,I edge features)
+#                2 = +I       (legacy I label; native node + distance,I edge features)
 #     seed_index 1=42  2=1234  3=3407  4=0  5=777
 
 base: ../models/mtp_go.yaml

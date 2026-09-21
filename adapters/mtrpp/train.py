@@ -26,6 +26,7 @@ from adapters.mtrpp.dataset import (  # noqa: E402
     save_processed_split,
 )
 from adapters.mtrpp.multiagent_dataset import MultiAgentMTRDataset, build_intention_points_from_multiagent  # noqa: E402
+from adapters.mtrpp.mtrpp_model import MTRPPMotionTransformer  # noqa: E402
 from adapters.mtrpp.upstream import import_motion_transformer, upstream_commit, using_cuda_op_stubs  # noqa: E402
 
 try:
@@ -64,6 +65,8 @@ DEFAULTS: dict[str, Any] = {
     "upstream_dir": "external/mtrpp",
     "global_attention_fallback": False,
     "multiagent": False,
+    "architecture": "mtr",
+    "use_importance": False,
     "model_hparams": {},
     "smoke": {
         "epochs": 1,
@@ -122,6 +125,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--upstream-dir", type=Path)
     p.add_argument("--global-attention-fallback", action="store_true")
     p.add_argument("--multiagent", action="store_true", help="Use data/{dataset}_multiagent/{split}_full arrays")
+    p.add_argument("--architecture", choices=["mtr", "mtrpp"], help="Model architecture; defaults to existing MTR path")
+    p.add_argument("--use-importance", action="store_true", help="Add scalar I through MTR local relative attention weights")
     p.add_argument("--resume", type=Path)
     p.add_argument("--check-data", action="store_true")
     return p.parse_args(argv)
@@ -257,8 +262,25 @@ def apply_cli(cfg: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]:
         cfg["global_attention_fallback"] = True
     if args.multiagent:
         cfg["multiagent"] = True
+    if args.architecture:
+        cfg["architecture"] = args.architecture
+    if args.use_importance:
+        cfg["use_importance"] = True
+    cfg["architecture"] = str(cfg.get("architecture", "mtr")).lower()
+    if cfg["architecture"] not in {"mtr", "mtrpp"}:
+        raise SystemExit(f"Unsupported architecture: {cfg['architecture']}")
+    if cfg["architecture"] == "mtrpp":
+        if cfg.get("use_importance"):
+            raise SystemExit("MTR++ importance integration has not been enabled yet.")
+        if not cfg.get("multiagent"):
+            raise SystemExit("architecture=mtrpp requires --multiagent scene arrays.")
     if not cfg["dataset"] or not cfg["feature_mode"]:
         raise SystemExit("dataset and feature_mode must be set by config or CLI")
+    if cfg.get("use_importance"):
+        if cfg["feature_mode"] != "baseline":
+            raise SystemExit("MTR --use-importance requires feature_mode=baseline to avoid node-feature interaction channels.")
+        if not cfg.get("multiagent"):
+            raise SystemExit("MTR --use-importance requires --multiagent data with directed pair importance.")
     if not cfg["exp_tag"]:
         cfg["exp_tag"] = f"{cfg['dataset']}_{cfg['feature_mode']}"
     cfg["mode"] = mode
@@ -326,6 +348,8 @@ def build_model_config(cfg: dict[str, Any], ds: NeighFormerMTRDataset, intention
     map_d_model = int(hp.get("map_d_model", d_model))
     heads = int(hp.get("num_attn_head", 8))
     model = {
+        "ARCHITECTURE": cfg.get("architecture", "mtr"),
+        "SCHEMA_VERSION": "mtrpp_scene_first_v1" if cfg.get("architecture") == "mtrpp" else "mtr_center_target_compat",
         "CONTEXT_ENCODER": {
             "NAME": "MTREncoder",
             "NUM_OF_ATTN_NEIGHBORS": int(hp.get("num_attn_neighbors", 16)),
@@ -341,6 +365,8 @@ def build_model_config(cfg: dict[str, Any], ds: NeighFormerMTRDataset, intention
             "NUM_ATTN_HEAD": heads,
             "DROPOUT_OF_ATTN": float(hp.get("dropout", 0.1)),
             "USE_LOCAL_ATTN": bool(hp.get("use_local_attn", True)) and not effective_global_fallback,
+            "USE_IMPORTANCE": bool(cfg.get("use_importance", False)),
+            "USE_QUERY_CENTRIC_RELATIVE_PE": bool(cfg.get("architecture") == "mtrpp"),
         },
         "MOTION_DECODER": {
             "NAME": "MTRDecoder",
@@ -358,6 +384,7 @@ def build_model_config(cfg: dict[str, Any], ds: NeighFormerMTRDataset, intention
             "NUM_WAYPOINT_MAP_POLYLINES": int(hp.get("num_waypoint_map_polylines", 32)),
             "LOSS_WEIGHTS": {"cls": 1.0, "reg": 1.0, "vel": 0.5},
             "NMS_DIST_THRESH": float(hp.get("nms_dist_thresh", 2.5)),
+            "USE_MUTUALLY_GUIDED_QUERYING": bool(cfg.get("architecture") == "mtrpp"),
         },
     }
     return to_attrdict(model)
@@ -374,6 +401,19 @@ def prediction_tensors(batch_dict: dict[str, Any]):
     import torch
 
     pred_scores = batch_dict["pred_scores"]
+    if pred_scores.ndim == 3:
+        pred_trajs = batch_dict["pred_trajs"][..., 0:2]
+        best = pred_scores.argmax(dim=-1)
+        b_idx = torch.arange(pred_trajs.size(0), device=pred_trajs.device)[:, None]
+        m_idx = torch.arange(pred_trajs.size(1), device=pred_trajs.device)[None, :]
+        pred = pred_trajs[b_idx, m_idx, best]
+        target = batch_dict["input_dict"]["focal_gt_trajs"][..., 0:2].type_as(pred)
+        all_modes = pred_trajs.permute(0, 1, 3, 2, 4).contiguous()
+        valid_focal = batch_dict["input_dict"]["focal_mask"].bool()
+        pred = pred[valid_focal]
+        target = target[valid_focal]
+        all_modes = all_modes[valid_focal]
+        return pred, target, all_modes
     pred_trajs = batch_dict["pred_trajs"][:, :, :, 0:2]
     best = pred_scores.argmax(dim=-1)
     pred = pred_trajs[torch.arange(pred_trajs.size(0), device=pred_trajs.device), best]
@@ -488,7 +528,8 @@ def main(argv: list[str] | None = None) -> int:
             cfg["dataset"],
             "train",
             indices=train_idx,
-            target_agent_mode=True,
+            target_agent_mode=cfg.get("architecture") != "mtrpp",
+            scene_first_mtrpp=cfg.get("architecture") == "mtrpp",
             **builder_kwargs,
         )
         progress("building val dataset")
@@ -497,7 +538,8 @@ def main(argv: list[str] | None = None) -> int:
             cfg["dataset"],
             "val",
             indices=val_idx,
-            target_agent_mode=True,
+            target_agent_mode=cfg.get("architecture") != "mtrpp",
+            scene_first_mtrpp=cfg.get("architecture") == "mtrpp",
             **builder_kwargs,
         )
     else:
@@ -554,6 +596,10 @@ def main(argv: list[str] | None = None) -> int:
 
     effective_global_fallback = bool(force_global or using_cuda_op_stubs())
     cfg["effective_global_attention_fallback"] = effective_global_fallback
+    if cfg.get("use_importance") and effective_global_fallback:
+        raise SystemExit("Importance-enabled MTR requires local attention support.")
+    if cfg.get("architecture") == "mtrpp" and cfg.get("use_importance"):
+        raise SystemExit("MTR++ importance integration has not been enabled yet.")
     if cfg["mode"] == "full" and effective_global_fallback and not force_global:
         print(
             "[WARN] MTR++ CUDA ops (knn_cuda, attention_cuda) are not built; "
@@ -581,12 +627,15 @@ def main(argv: list[str] | None = None) -> int:
     model_cfg = build_model_config(cfg, train_ds, intention_file)
     mtr_global_cfg.ROOT_DIR = EXPERIMENT_ROOT
     progress("building model")
-    model = MotionTransformer(config=model_cfg).to(device)
+    model_cls = MTRPPMotionTransformer if cfg.get("architecture") == "mtrpp" else MotionTransformer
+    model = model_cls(config=model_cfg).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=float(cfg["lr"]), weight_decay=float(cfg["weight_decay"]))
     start_epoch = 0
     if args.resume:
         resume = args.resume if args.resume.is_absolute() else resolve_path(args.resume)
         ckpt = torch.load(resume, map_location="cpu", weights_only=False)
+        if ckpt.get("metadata", {}).get("architecture", ckpt.get("cfg", {}).get("architecture", "mtr")) != cfg.get("architecture", "mtr"):
+            raise SystemExit("Checkpoint architecture does not match requested architecture.")
         model.load_state_dict(ckpt["model_state"])
         if ckpt.get("optimizer_state"):
             optimizer.load_state_dict(ckpt["optimizer_state"])
@@ -599,6 +648,7 @@ def main(argv: list[str] | None = None) -> int:
     progress(f"dataloaders ready: train_batches={len(train_loader):,} val_batches={len(val_loader):,}")
     best_fde = float("inf")
     print("====== MTR++ Train ======", flush=True)
+    print(f"arch     : {cfg.get('architecture', 'mtr')}", flush=True)
     print(f"upstream : {upstream_dir} ({upstream_commit(upstream_dir)})", flush=True)
     print(f"data     : {data_path}", flush=True)
     print(f"source   : {'multiagent' if cfg.get('multiagent') else 'single-agent canonical'}", flush=True)
@@ -650,6 +700,12 @@ def main(argv: list[str] | None = None) -> int:
         state = {
             "cfg": plain(cfg),
             "model_cfg": plain(model_cfg),
+            "metadata": {
+                "architecture": cfg.get("architecture", "mtr"),
+                "use_importance": bool(cfg.get("use_importance", False)),
+                "schema_version": "mtrpp_scene_first_v1" if cfg.get("architecture") == "mtrpp" else "mtr_center_target_compat",
+                "mtrpp_settings": plain((cfg.get("model_hparams") or {})) if cfg.get("architecture") == "mtrpp" else {},
+            },
             "model_state": model.state_dict(),
             "optimizer_state": optimizer.state_dict(),
             "epoch": epoch + 1,

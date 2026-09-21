@@ -8,8 +8,11 @@ from typing import Any
 import numpy as np
 import pickle
 
+from adapters.mtrpp.importance import last_valid_importance_matrix
 from adapters.mtrpp.dataset import NeighFormerMTRDataset, OBJECT_TYPE_VEHICLE, _heading_from_velocity
+from adapters.mtrpp.mtrpp_geometry import latest_token_pose, localize_agent_state, localize_map_polylines
 from adapters.multiagent_common import MultiAgentArrays, scene_agent_indices, scored_local_indices
+from data.multiagent.interaction import InteractionConfig, build_pair_features
 
 
 class MultiAgentMTRDataset:
@@ -27,6 +30,7 @@ class MultiAgentMTRDataset:
         map_points_each_polyline: int = 20,
         lane_half_length: float = 160.0,
         lane_width: float = 3.7,
+        scene_first_mtrpp: bool = False,
     ) -> None:
         self.data_dir = Path(data_dir)
         self.dataset_name = dataset_name
@@ -42,6 +46,7 @@ class MultiAgentMTRDataset:
         self.map_points_each_polyline = int(map_points_each_polyline)
         self.lane_half_length = float(lane_half_length)
         self.lane_width = float(lane_width)
+        self.scene_first_mtrpp = bool(scene_first_mtrpp)
         self.agent_attr_dim = 6 + 5 + (self.history_len + 1) + 2 + 2 + 2
         self.builder = self
         self._target_scene_indices: np.ndarray | None = None
@@ -68,6 +73,8 @@ class MultiAgentMTRDataset:
         self._target_agent_indices = np.asarray(agents, dtype=np.int64)
 
     def __len__(self) -> int:
+        if self.scene_first_mtrpp:
+            return int(self.scene_indices.size)
         if self.target_agent_mode:
             assert self._target_scene_indices is not None
             return int(self._target_scene_indices.size)
@@ -90,8 +97,28 @@ class MultiAgentMTRDataset:
         scored = np.asarray(arrays["scored_agent_mask"][scene_idx], dtype=bool)
         lengths = np.asarray(arrays["agent_length"][scene_idx], dtype=np.float32)
         widths = np.asarray(arrays["agent_width"][scene_idx], dtype=np.float32)
+        pair_features, pair_valid = build_pair_features(
+            x,
+            obs,
+            lengths,
+            widths,
+            np.asarray(arrays["agent_type"][scene_idx], dtype=np.int8),
+            np.asarray(arrays["lane_id"][scene_idx], dtype=np.int32),
+            np.asarray(arrays["lane_offset"][scene_idx], dtype=np.float32),
+            np.asarray(arrays["lane_width"][scene_idx], dtype=np.float32),
+            lane_level=np.asarray(arrays["lane_level"][scene_idx], dtype=np.int16) if "lane_level" in arrays else None,
+            heading=np.asarray(arrays["heading"][scene_idx], dtype=np.float32) if "heading" in arrays else None,
+            lateral_velocity=(
+                np.asarray(arrays["lateral_velocity"][scene_idx], dtype=np.float32)
+                if "lateral_velocity" in arrays
+                else None
+            ),
+            config=InteractionConfig(dataset=self.dataset_name, apply_topn=False),
+        )
         keep = scene_agent_indices(agent_ids, obs)
         scored_local = scored_local_indices(scored, keep)
+        if self.scene_first_mtrpp and forced_target_agent is not None:
+            raise RuntimeError("scene_first_mtrpp cannot be combined with target_agent_mode")
         if forced_target_agent is not None:
             where = np.flatnonzero(keep == forced_target_agent)
             scored_local = where[:1].astype(np.int64)
@@ -99,9 +126,14 @@ class MultiAgentMTRDataset:
             scored_local = np.asarray([0], dtype=np.int64)
         n_obj = int(keep.size)
         n_ctr = int(scored_local.size)
+        agent_importance_single, agent_importance_valid_single, agent_importance_last_t_single = (
+            last_valid_importance_matrix(pair_features, pair_valid, keep)
+        )
 
         past_state = np.zeros((n_obj, self.history_len, 10), dtype=np.float32)
         past_mask = np.asarray(obs[keep], dtype=bool)
+        agent_token_pos = np.zeros((n_obj, 2), dtype=np.float32)
+        agent_token_heading = np.zeros((n_obj,), dtype=np.float32)
         for obj_i, src in enumerate(keep):
             past_state[obj_i, :, 0:2] = x[src, :, 0:2]
             past_state[obj_i, :, 3] = max(float(lengths[src]), 0.1)
@@ -110,8 +142,89 @@ class MultiAgentMTRDataset:
             past_state[obj_i, :, 6] = _heading_from_velocity(x[src, :, 2:4])
             past_state[obj_i, :, 7:9] = x[src, :, 2:4]
             past_state[obj_i, :, 9] = past_mask[obj_i].astype(np.float32)
+            token_pos, token_heading, _ = latest_token_pose(
+                past_state[obj_i, :, 0:2],
+                past_state[obj_i, :, 7:9],
+                past_mask[obj_i],
+            )
+            agent_token_pos[obj_i] = token_pos
+            agent_token_heading[obj_i] = token_heading
 
-        obj_trajs_single = self._pack_agent_features(past_state, past_mask)
+        pack_state = past_state
+        if self.scene_first_mtrpp:
+            pack_state = np.stack(
+                [
+                    localize_agent_state(past_state[obj_i], past_mask[obj_i], agent_token_pos[obj_i], float(agent_token_heading[obj_i]))
+                    for obj_i in range(n_obj)
+                ],
+                axis=0,
+            )
+
+        obj_trajs_single = self._pack_agent_features(pack_state, past_mask)
+        if self.scene_first_mtrpp:
+            obj_trajs_last_pos_single = np.zeros((n_obj, 3), dtype=np.float32)
+            obj_trajs_last_pos_single[:, 0:2] = agent_token_pos
+            future_state_single = np.zeros((n_obj, self.future_len, 4), dtype=np.float32)
+            future_mask_single = np.asarray(fut_valid[keep], dtype=bool)
+            for obj_i, src in enumerate(keep):
+                future_state_single[obj_i, :, 0:2] = y[src, :, 0:2]
+                future_state_single[obj_i, :, 2:4] = y[src, :, 2:4]
+            center_gt = future_state_single[scored_local].copy()
+            center_gt_mask = future_mask_single[scored_local].copy()
+            center_src = np.zeros((n_ctr, self.future_len, 10), dtype=np.float32)
+            for center_i, obj_i in enumerate(scored_local):
+                src = int(keep[obj_i])
+                center_src[center_i, :, 0:2] = y[src, :, 0:2]
+                center_src[center_i, :, 3] = max(float(lengths[src]), 0.1)
+                center_src[center_i, :, 4] = max(float(widths[src]), 0.1)
+                center_src[center_i, :, 5] = self.vehicle_height
+                center_src[center_i, :, 6] = _heading_from_velocity(y[src, :, 2:4])
+                center_src[center_i, :, 7:9] = y[src, :, 2:4]
+                center_src[center_i, :, 9] = center_gt_mask[center_i].astype(np.float32)
+            center_world = np.zeros((n_ctr, 10), dtype=np.float32)
+            for center_i, obj_i in enumerate(scored_local):
+                src = int(keep[obj_i])
+                center_world[center_i, 0:2] = x[src, -1, 0:2]
+                center_world[center_i, 3] = max(float(lengths[src]), 0.1)
+                center_world[center_i, 4] = max(float(widths[src]), 0.1)
+                center_world[center_i, 5] = self.vehicle_height
+                center_world[center_i, 6] = agent_token_heading[obj_i]
+                center_world[center_i, 7:9] = x[src, -1, 2:4]
+                center_world[center_i, 9] = 1.0
+            map_data, map_mask, _ = self._pseudo_map()
+            map_data_local, map_center, map_heading = localize_map_polylines(map_data, map_mask)
+            return {
+                "scenario_id": np.asarray([f"{self.dataset_name}_{self.split}_{scene_idx}"]),
+                "obj_trajs": obj_trajs_single,
+                "obj_trajs_mask": past_mask,
+                "focal_track_indices": scored_local.astype(np.int64),
+                "focal_mask": np.ones((n_ctr,), dtype=bool),
+                "track_index_to_predict": scored_local.astype(np.int64),
+                "obj_trajs_pos": past_state[:, :, 0:3].copy(),
+                "obj_trajs_last_pos": obj_trajs_last_pos_single,
+                "agent_token_pos": agent_token_pos,
+                "agent_token_heading": agent_token_heading,
+                "obj_types": np.asarray([OBJECT_TYPE_VEHICLE] * n_obj),
+                "obj_ids": agent_ids[keep].astype(np.int64),
+                "obj_original_idx": keep.astype(np.int64),
+                "center_objects_world": center_world,
+                "center_objects_id": agent_ids[keep[scored_local]].astype(np.int64),
+                "center_objects_type": np.asarray([OBJECT_TYPE_VEHICLE] * n_ctr),
+                "obj_trajs_future_state": future_state_single,
+                "obj_trajs_future_mask": future_mask_single,
+                "focal_gt_trajs": center_gt,
+                "focal_gt_mask": center_gt_mask,
+                "center_gt_trajs": center_gt,
+                "center_gt_trajs_mask": center_gt_mask,
+                "center_gt_final_valid_idx": np.asarray([max(0, np.flatnonzero(m).max()) if m.any() else 0 for m in center_gt_mask], dtype=np.float32),
+                "center_gt_trajs_src": center_src,
+                "map_polylines": map_data_local,
+                "map_polylines_mask": map_mask,
+                "map_polylines_center": map_center,
+                "map_token_heading": map_heading,
+                "sample_index": np.asarray([scene_idx], dtype=np.int64),
+            }
+
         obj_trajs = np.repeat(obj_trajs_single[None], n_ctr, axis=0)
         obj_trajs_mask = np.repeat(past_mask[None], n_ctr, axis=0)
         obj_trajs_pos = np.repeat(past_state[None, :, :, 0:3], n_ctr, axis=0)
@@ -163,6 +276,10 @@ class MultiAgentMTRDataset:
             "obj_trajs_last_pos": obj_trajs_last_pos,
             "obj_types": np.asarray([OBJECT_TYPE_VEHICLE] * n_obj),
             "obj_ids": agent_ids[keep].astype(np.int64),
+            "obj_original_idx": np.repeat(keep[None].astype(np.int64), n_ctr, axis=0),
+            "agent_importance": np.repeat(agent_importance_single[None], n_ctr, axis=0),
+            "agent_importance_valid": np.repeat(agent_importance_valid_single[None], n_ctr, axis=0),
+            "agent_importance_last_t": np.repeat(agent_importance_last_t_single[None], n_ctr, axis=0),
             "center_objects_world": center_world,
             "center_objects_id": agent_ids[keep[scored_local]].astype(np.int64),
             "center_objects_type": np.asarray([OBJECT_TYPE_VEHICLE] * n_ctr),
@@ -215,7 +332,85 @@ class MultiAgentMTRDataset:
         return polylines, mask, center
 
     def collate_batch(self, batch_list: list[dict[str, Any]]) -> dict[str, Any]:
+        if self.scene_first_mtrpp:
+            return self.collate_scene_first_batch(batch_list)
         return NeighFormerMTRDataset.collate_batch(self, batch_list)
+
+    def collate_scene_first_batch(self, batch_list: list[dict[str, Any]]) -> dict[str, Any]:
+        import torch
+
+        input_dict: dict[str, Any] = {}
+        max_n = max(item["obj_trajs"].shape[0] for item in batch_list)
+        max_m = max(item["focal_track_indices"].shape[0] for item in batch_list)
+        max_p = max(item["map_polylines"].shape[0] for item in batch_list)
+
+        def pad_obj(key: str):
+            tensors = [torch.from_numpy(item[key]) for item in batch_list]
+            out = tensors[0].new_zeros((len(tensors), max_n, *tensors[0].shape[1:]))
+            for b, tensor in enumerate(tensors):
+                out[b, : tensor.shape[0]] = tensor
+            input_dict[key] = out
+
+        def pad_focal(key: str, fill_value: int | float | bool = 0):
+            tensors = [torch.from_numpy(item[key]) for item in batch_list]
+            out = tensors[0].new_full((len(tensors), max_m, *tensors[0].shape[1:]), fill_value)
+            for b, tensor in enumerate(tensors):
+                out[b, : tensor.shape[0]] = tensor
+            input_dict[key] = out
+
+        def pad_map(key: str):
+            tensors = [torch.from_numpy(item[key]) for item in batch_list]
+            out = tensors[0].new_zeros((len(tensors), max_p, *tensors[0].shape[1:]))
+            for b, tensor in enumerate(tensors):
+                out[b, : tensor.shape[0]] = tensor
+            input_dict[key] = out
+
+        for key in (
+            "obj_trajs",
+            "obj_trajs_mask",
+            "obj_trajs_pos",
+            "obj_trajs_last_pos",
+            "agent_token_pos",
+            "agent_token_heading",
+            "obj_original_idx",
+            "obj_trajs_future_state",
+            "obj_trajs_future_mask",
+        ):
+            pad_obj(key)
+        for key in ("focal_track_indices", "track_index_to_predict"):
+            pad_focal(key, fill_value=0)
+        for key in ("focal_mask",):
+            pad_focal(key, fill_value=False)
+        for key in ("focal_gt_trajs", "center_gt_trajs", "center_gt_trajs_src"):
+            pad_focal(key)
+        for key in ("focal_gt_mask", "center_gt_trajs_mask"):
+            pad_focal(key, fill_value=False)
+        for key in ("center_gt_final_valid_idx",):
+            pad_focal(key, fill_value=0)
+        for key in ("map_polylines", "map_polylines_mask", "map_polylines_center", "map_token_heading"):
+            pad_map(key)
+
+        input_dict["scenario_id"] = np.concatenate([item["scenario_id"] for item in batch_list], axis=0)
+        input_dict["obj_types"] = [item["obj_types"] for item in batch_list]
+        input_dict["obj_ids"] = [item["obj_ids"] for item in batch_list]
+        input_dict["center_objects_type"] = [item["center_objects_type"] for item in batch_list]
+        input_dict["center_objects_id"] = [item["center_objects_id"] for item in batch_list]
+        input_dict["center_objects_world"] = torch.from_numpy(
+            np.stack(
+                [
+                    np.pad(item["center_objects_world"], ((0, max_m - item["center_objects_world"].shape[0]), (0, 0)))
+                    for item in batch_list
+                ],
+                axis=0,
+            )
+        )
+        input_dict["sample_index"] = torch.cat([torch.from_numpy(item["sample_index"]) for item in batch_list], dim=0)
+        return {
+            "batch_size": len(batch_list),
+            "input_dict": input_dict,
+            "batch_sample_count": [int(item["focal_track_indices"].shape[0]) for item in batch_list],
+            "schema": "mtrpp_scene_first_v1",
+        }
 
     def describe(self) -> dict[str, Any]:
         return {
@@ -229,6 +424,8 @@ class MultiAgentMTRDataset:
             "agent_attr_dim": self.agent_attr_dim,
             "source": "multiagent",
             "target_agent_mode": self.target_agent_mode,
+            "scene_first_mtrpp": self.scene_first_mtrpp,
+            "schema": "mtrpp_scene_first_v1" if self.scene_first_mtrpp else "mtr_center_target_compat",
         }
 
     def channel_stats(self, n_samples: int = 256) -> dict[str, Any]:

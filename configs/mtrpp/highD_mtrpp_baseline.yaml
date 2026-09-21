@@ -1,0 +1,10 @@
+# MTR++ baseline | highD | scene-first symmetric context
+base: _base.yaml
+exp_tag: highD_mtrpp_baseline
+dataset: highD
+feature_mode: baseline
+training:
+  architecture: mtrpp
+  use_importance: false
+runtime:
+  seed: 42

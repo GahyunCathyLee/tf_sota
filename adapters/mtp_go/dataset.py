@@ -1,8 +1,7 @@
 """NeighFormer npy -> MTP-GO scene-graph conversion.
 
-Feature mapping (see ``adapters/common_schema.md`` and
-``external/mtp_go/data/highD/preprocess.py`` for the upstream convention this
-mirrors):
+Feature mapping (see ``adapters/common_schema.md`` and the upstream MTP-GO
+preprocessing convention this mirrors):
 
     node 0        = ego (target vehicle)
         [x, y, xVelocity, yVelocity, xAcceleration, yAcceleration]  from x_ego
@@ -11,17 +10,16 @@ mirrors):
         [dx, dy, dvx, dvy, dax, day]                                from x_nb
         ego-relative, exactly the channels upstream ``highD-imp`` uses
 
-    feature_mode == "baseline" -> 6 node channels  (x_nb indices 0..5)
-    feature_mode == "I"        -> 7 node channels  (x_nb indices 0..5, 9)
-    feature_mode == "dimI"     -> 8 node channels  (x_nb indices 0..5, 8, 9)
-                                  channel 6 = dim (vehicle size bin 0..4)
-                                  channel 7 = I   (importance in [0, 1])
-                                  the ego node gets EGO_EXTRA_FILL for both,
-                                  mirroring upstream's ``inp[0, :, 6] = -1.0``
+    all feature modes -> 6 native node channels only
 
-Edges are rebuilt per history step exactly like upstream ``_build_edges``:
+Edges are rebuilt per history step exactly like upstream graph preprocessing:
 fully connected (self-loops included) over the nodes present at that step, with
 a single scalar edge feature = Euclidean distance in the ego-relative frame.
+
+The canonical NeighFormer arrays only store ego-neighbour interaction values,
+so ``use_importance`` is intentionally unsupported here: MTP-GO graph edges also
+include neighbour-neighbour pairs. Use the persistent multi-agent arrays, where
+pairwise ``I_ij`` can be computed from physical agent state.
 
 Targets: canonical NeighFormer arrays contain only the ego future. If
 ``y_nb.npy``/``y_nb_mask.npy`` are present, fixed-ID neighbour futures are also
@@ -40,16 +38,11 @@ import torch
 from torch_geometric.data import Data, Dataset
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from adapters.common import feature_mode_indices, feature_mode_names  # noqa: E402
-
-# Sentinel written into the ego row for the extra `dimI` channels. Upstream uses
-# -1.0 for the ego importance value, and both extra channels are non-negative
-# for real neighbours, so -1.0 stays out of the valid range.
-EGO_EXTRA_FILL = -1.0
 
 # Node target layout: [x, y, vx, vy, ax, ay]. Motion models only consume the
 # first ``n_states`` of these (4 for the default 2Xnode model).
 TARGET_CHANNELS = 6
+NATIVE_NODE_FEATURES = 6
 
 
 class MTPGoData(Data):
@@ -88,15 +81,21 @@ class NeighFormerGraphDataset(Dataset):
         indices: np.ndarray,
         feature_mode: str,
         split: str = "train",
+        use_importance: bool = False,
     ) -> None:
         super().__init__(None, None, None)
         self.data_dir = Path(data_dir)
         self.sample_indices = np.asarray(indices, dtype=np.int64)
         self.feature_mode = feature_mode
+        self.use_importance = bool(use_importance)
+        if self.use_importance:
+            raise ValueError(
+                "MTP-GO use_importance=true requires multi-agent arrays because canonical "
+                "x_nb only stores ego-neighbour I, not arbitrary graph-edge I_ij."
+            )
         self.split = split
-        self.nb_feature_indices = np.asarray(feature_mode_indices(feature_mode), dtype=np.int64)
-        self.nb_feature_names = feature_mode_names(feature_mode)
-        self.n_node_features = len(self.nb_feature_indices)
+        self.n_node_features = NATIVE_NODE_FEATURES
+        self.edge_feature_dim = 1
         self._arrays: dict[str, np.ndarray] | None = None
 
         # Read shapes once up front (cheap with mmap) so callers can validate.
@@ -114,11 +113,6 @@ class NeighFormerGraphDataset(Dataset):
 
         if self.ego_channels != 6:
             raise ValueError(f"Expected 6 ego channels, got {self.ego_channels}")
-        if int(nb.shape[3]) < int(self.nb_feature_indices.max()) + 1:
-            raise ValueError(
-                f"x_nb has {nb.shape[3]} channels, feature mode "
-                f"{feature_mode} needs index {int(self.nb_feature_indices.max())}"
-            )
 
     # ---------------------------------------------------------------- loading
     def _ensure_open(self) -> dict[str, np.ndarray]:
@@ -148,7 +142,7 @@ class NeighFormerGraphDataset(Dataset):
         i = int(self.sample_indices[idx])
 
         ego = np.asarray(arrays["x_ego"][i], dtype=np.float32)        # (T_h, 6)
-        nb = np.asarray(arrays["x_nb"][i], dtype=np.float32)          # (T_h, K, 10)
+        nb = np.asarray(arrays["x_nb"][i], dtype=np.float32)          # (T_h, K, 13)
         mask = np.asarray(arrays["nb_mask"][i], dtype=bool)           # (T_h, K)
 
         slots = np.flatnonzero(mask.any(axis=0))                      # kept neighbour slots
@@ -156,12 +150,10 @@ class NeighFormerGraphDataset(Dataset):
         t_h, t_f = self.history_len, self.future_len
 
         # ---- node history features
-        x = np.zeros((n_nodes, t_h, self.n_node_features), dtype=np.float32)
-        x[0, :, :6] = ego
-        if self.n_node_features > 6:
-            x[0, :, 6:] = EGO_EXTRA_FILL
+        x = np.zeros((n_nodes, t_h, NATIVE_NODE_FEATURES), dtype=np.float32)
+        x[0, :, :NATIVE_NODE_FEATURES] = ego[:, :NATIVE_NODE_FEATURES]
         if slots.size:
-            nb_sel = nb[:, slots, :][:, :, self.nb_feature_indices]   # (T_h, n_slots, F)
+            nb_sel = nb[:, slots, :NATIVE_NODE_FEATURES]              # (T_h, n_slots, 6)
             nb_sel = np.where(mask[:, slots][..., None], nb_sel, 0.0)
             x[1:] = np.transpose(nb_sel, (1, 0, 2))
 
@@ -230,8 +222,7 @@ class NeighFormerGraphDataset(Dataset):
     def channel_stats(self, n_samples: int = 256) -> dict[str, Any]:
         """Per-channel stats over the neighbour node rows of a few scene graphs.
 
-        Used to show that every selected channel (notably `dim` and `I` in dimI
-        mode) actually reaches the model instead of being silently dropped.
+        Used to show that only native MTP-GO node features reach the model.
         """
         n = min(n_samples, self.len())
         rows: list[np.ndarray] = []
@@ -243,10 +234,13 @@ class NeighFormerGraphDataset(Dataset):
         if not rows:
             return {}
         stacked = np.concatenate(rows, axis=0)
-        names = ["x|dx", "y|dy", "vx|dvx", "vy|dvy", "ax|dax", "ay|day"] + self.nb_feature_names[6:]
+        names = ["x|dx", "y|dy", "vx|dvx", "vy|dvy", "ax|dax", "ay|day"]
         return {
             "samples_inspected": n,
             "neighbor_rows": int(stacked.shape[0]),
+            "consumed_node_features": names,
+            "consumed_edge_features": ["distance"],
+            "excluded_proposed_node_channels": ["lc_state", "lit", "lis", "gate", "I_x", "I_y", "dim", "I"],
             "per_channel": {
                 names[c]: {
                     "min": float(stacked[:, c].min()),
@@ -270,8 +264,11 @@ class NeighFormerGraphDataset(Dataset):
             "max_neighbors": self.max_neighbors,
             "ego_channels": self.ego_channels,
             "node_feature_channels": self.n_node_features,
-            "neighbor_indices": [int(v) for v in self.nb_feature_indices],
-            "neighbor_names": self.nb_feature_names,
+            "node_feature_names": ["x", "y", "xV", "yV", "xA", "yA"],
+            "edge_feature_channels": self.edge_feature_dim,
+            "edge_feature_names": ["distance"],
+            "use_importance": self.use_importance,
+            "excluded_proposed_node_channels": ["lc_state", "lit", "lis", "gate", "I_x", "I_y", "dim", "I"],
             "y_vel_used": self.has_y_vel,
             "y_acc_used": self.has_y_acc,
             "neighbor_future_used": self.has_neighbor_future,
