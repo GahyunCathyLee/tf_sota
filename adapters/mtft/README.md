@@ -58,6 +58,26 @@ python train.py --config configs/mtft/exiD0-1.yaml
 python train.py --config configs/mtft/exiD2-1.yaml
 ```
 
+Colab-style overrides:
+
+```bash
+python train.py \
+  --config configs/mtft/exiD2-1.yaml \
+  --epochs 100 \
+  --batch-size 128 \
+  --eval-batch-size 256 \
+  --num-workers 2 \
+  --lr 1e-4 \
+  --weight-decay 0.0 \
+  --grad-clip 1.0 \
+  --ckpt-dir /content/drive/MyDrive/TrajectoryPrediction/ckpts/mtft \
+  --output-dir /content/drive/MyDrive/TrajectoryPrediction/runs/mtft/{dataset}/{feature_mode}/{exp_tag}
+```
+
+Other supported train overrides include `--data-root`, `--split-root`,
+`--exp-tag`, `--seed`, `--device`, `--amp/--no-amp`, `--hidden-dim`,
+`--num-layers`, `--num-heads`, and `--dropout`.
+
 Evaluation:
 
 ```bash

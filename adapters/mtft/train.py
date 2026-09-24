@@ -62,6 +62,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--config", required=True, type=Path)
     p.add_argument("--dataset", choices=["highD", "exiD"])
+    p.add_argument("--data-root", type=Path)
+    p.add_argument("--split-root", type=Path)
+    p.add_argument("--ckpt-dir", type=Path)
+    p.add_argument("--output-dir", type=Path)
+    p.add_argument("--exp-tag", type=str)
     p.add_argument("--use-I", action="store_true")
     p.add_argument("--epochs", type=int)
     p.add_argument("--batch-size", type=int)
@@ -69,6 +74,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--num-workers", type=int)
     p.add_argument("--seed", type=int)
     p.add_argument("--device", type=str)
+    p.add_argument("--lr", type=float)
+    p.add_argument("--weight-decay", type=float)
+    p.add_argument("--grad-clip", type=float)
+    p.add_argument("--amp", action=argparse.BooleanOptionalAction)
+    p.add_argument("--hidden-dim", type=int)
+    p.add_argument("--num-layers", type=int)
+    p.add_argument("--num-heads", type=int)
+    p.add_argument("--dropout", type=float)
     p.add_argument("--max-train-samples", type=int)
     p.add_argument("--max-eval-samples", type=int)
     p.add_argument("--check-data", action="store_true")
@@ -140,18 +153,36 @@ def load_config(path: Path) -> dict[str, Any]:
 def apply_cli(cfg: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]:
     for arg_name, cfg_name in (
         ("dataset", "dataset"),
+        ("data_root", "data_root"),
+        ("split_root", "split_root"),
+        ("ckpt_dir", "ckpt_dir"),
+        ("output_dir", "output_dir"),
+        ("exp_tag", "exp_tag"),
         ("epochs", "epochs"),
         ("batch_size", "batch_size"),
         ("eval_batch_size", "eval_batch_size"),
         ("num_workers", "num_workers"),
         ("seed", "seed"),
         ("device", "device"),
+        ("lr", "lr"),
+        ("weight_decay", "weight_decay"),
+        ("grad_clip", "grad_clip"),
+        ("amp", "amp"),
         ("max_train_samples", "max_train_samples"),
         ("max_eval_samples", "max_eval_samples"),
     ):
         value = getattr(args, arg_name)
         if value is not None:
-            cfg[cfg_name] = value
+            cfg[cfg_name] = str(value) if isinstance(value, Path) else value
+    for arg_name, model_name in (
+        ("hidden_dim", "hidden_dim"),
+        ("num_layers", "num_layers"),
+        ("num_heads", "num_heads"),
+        ("dropout", "dropout"),
+    ):
+        value = getattr(args, arg_name)
+        if value is not None:
+            cfg.setdefault("model_hparams", {})[model_name] = value
     if args.use_I:
         cfg["feature_mode"] = "I"
         cfg.setdefault("model_hparams", {})["use_I"] = True
