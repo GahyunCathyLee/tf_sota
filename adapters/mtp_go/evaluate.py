@@ -41,6 +41,7 @@ from adapters.mtp_go.metrics import (  # noqa: E402
     load_scenario_labels,
     print_latency,
     print_metrics,
+    print_scene_metrics,
     print_scenario_results,
 )
 from adapters.mtp_go.multiagent_dataset import MultiAgentMTPGoDataset  # noqa: E402
@@ -354,6 +355,7 @@ def main(argv: list[str] | None = None) -> int:
 
     print(f"\n  n_samples = {results['n_samples']:,}")
     print_metrics(results)
+    print_scene_metrics(results)
 
     ev = results.pop("_event_stats", None)
     st = results.pop("_state_stats", None)

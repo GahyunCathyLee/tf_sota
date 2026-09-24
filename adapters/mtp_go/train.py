@@ -47,7 +47,7 @@ from adapters.mtp_go.dataset import (  # noqa: E402
 )
 from adapters.mtp_go.encoder import build_gru_gnn_encoder  # noqa: E402
 from adapters.mtp_go.lit_module import evaluate, make_lit_module_class  # noqa: E402
-from adapters.mtp_go.metrics import print_metrics  # noqa: E402
+from adapters.mtp_go.metrics import print_metrics, print_scene_metrics  # noqa: E402
 from adapters.mtp_go.multiagent_dataset import MultiAgentMTPGoDataset  # noqa: E402
 from adapters.mtp_go.upstream import (  # noqa: E402
     ROTATIONAL_MOTION_MODELS,
@@ -909,6 +909,7 @@ def main(argv: list[str] | None = None) -> int:
                     m.get("rmse", float("nan")), m.get("n_samples", 0))
     print(f"\n====== Test [{cfg['exp_tag']}] ======")
     print_metrics(metrics["test"])
+    print_scene_metrics(metrics["test"])
 
     # ---------------------------------------------------------------- configs
     env = environment_info(upstream_dir)

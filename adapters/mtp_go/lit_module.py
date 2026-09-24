@@ -93,12 +93,13 @@ def evaluate(
     """
     from losses import NLLMDNLoss  # upstream loss, on sys.path
 
-    from adapters.mtp_go.metrics import MetricAccumulator
+    from adapters.mtp_go.metrics import MetricAccumulator, SceneMetricAccumulator
 
     nll_fn = NLLMDNLoss()
     model = model.to(device)
     model.eval()
     acc = MetricAccumulator(dt=dt, hz=hz)
+    scene_acc = SceneMetricAccumulator()
 
     iterator = loader
     if progress:
@@ -118,11 +119,11 @@ def evaluate(
         ml = states[torch.arange(b, device=states.device), :, best]   # (B, T, 2)
 
         nll_val = nll_fn(states, covs, pis, tgt, mask)
+        target_rows = data.tar_real_mask[..., :2].all(dim=-1).any(dim=-1)
+        node_graph = data.batch[target_rows].detach().cpu().numpy().reshape(-1)
         labels = None
         if meta_lookup is not None and getattr(meta_lookup, "enabled", False):
             scene_labels = meta_lookup.lookup(data.sample_index.view(-1).cpu().numpy())
-            target_rows = data.tar_real_mask[..., :2].all(dim=-1).any(dim=-1)
-            node_graph = data.batch[target_rows].detach().cpu().numpy().reshape(-1)
             labels = [scene_labels[int(i)] if scene_labels is not None else None for i in node_graph]
 
         acc.update(
@@ -133,10 +134,12 @@ def evaluate(
             nll=float(nll_val) if torch.isfinite(nll_val) else None,
             labels=labels,
         )
+        scene_acc.update(states, tgt, mask, node_graph)
         if progress and hasattr(iterator, "set_postfix"):
             iterator.set_postfix(ADE=f"{acc.sum_ade / max(1, acc.n):.4f}")
 
     result = acc.result()
+    result.update(scene_acc.result())
     if acc.has_scenario:
         result["_event_stats"] = dict(acc.event_stats)
         result["_state_stats"] = dict(acc.state_stats)
