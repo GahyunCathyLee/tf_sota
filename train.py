@@ -94,6 +94,8 @@ def main(argv: list[str] | None = None) -> int:
         from adapters.qcnet.train import main as adapter_main
     elif adapter == "trajectronpp":
         from adapters.trajectronpp.train import main as adapter_main
+    elif adapter == "mtft":
+        from adapters.mtft.train import main as adapter_main
     else:
         raise SystemExit(f"Unknown adapter '{adapter}' in {known.config}")
     return adapter_main(argv)

@@ -143,3 +143,15 @@ models:
     feature_strategy: "Convert highD/exiD windows to Trajectron++ Environment pickles; keep the original model/training code and select baseline or dimI neighbor edge inputs through config."
     implementation_priority: 2
     compute_tier: "a100_recommended"
+
+  mtft:
+    display_name: "MTFT"
+    paper: "Multi-scale Temporal Fusion Transformer for Incomplete Vehicle Trajectory Prediction"
+    upstream_url: "https://github.com/ChaoLi97/MTFT.git"
+    upstream_type: "official"
+    license: "MIT"
+    original_datasets: ["HighD", "NGSIM", "Argoverse", "IArgoverse"]
+    local_status: "implemented:adapters/mtft"
+    feature_strategy: "Use MTFT's historical 2D coordinate inputs; baseline+I appends only scalar neighbor I as an input channel with target I=0."
+    implementation_priority: 1
+    compute_tier: "single_gpu"

@@ -1,0 +1,16 @@
+# MTFT | highD | baseline | seed 1234
+base: _base.yaml
+
+exp_tag: highD0-2
+dataset: highD
+feature_mode: baseline
+
+data:
+  name: highD
+
+model:
+  use_I: false
+
+training:
+  seed: 1234
+

@@ -1,0 +1,47 @@
+adapter: mtft
+model_name: mtft
+display_name: "MTFT"
+
+data:
+  name: ""
+  root: /home/gahyun/neighformer/data
+  split_root: /home/gahyun/neighformer/data
+  history_steps: 6
+  future_steps: 15
+  hz: 3.0
+  dt: 0.32
+  batch_size: 128
+  eval_batch_size: 256
+  num_workers: 4
+  pin_memory: true
+  persistent_workers: true
+
+model:
+  hidden_dim: 128
+  num_layers: 4
+  num_heads: 5
+  use_I: false
+  dropout: 0.15
+
+missing:
+  enabled: false
+  min_ratio: 0.0
+  max_ratio: 0.0
+
+training:
+  epochs: 100
+  lr: 1.0e-4
+  weight_decay: 0.0
+  seed: 42
+  device: cuda
+  amp: true
+  grad_clip: 1.0
+
+evaluation:
+  batch_size: 256
+  metrics: [ADE, FDE, RMSE, RMSE@1s, RMSE@2s, RMSE@3s, RMSE@4s, RMSE@5s]
+
+paths:
+  output_dir: runs/mtft/{dataset}/{feature_mode}/{exp_tag}
+  ckpt_dir: ckpts/mtft
+

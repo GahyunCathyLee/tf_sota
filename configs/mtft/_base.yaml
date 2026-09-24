@@ -1,0 +1,7 @@
+base: ../models/mtft.yaml
+
+# Naming follows the established adapter sweep convention:
+#   <dataset><feature>-<seed_index>
+#     feature 0 = baseline
+#     feature 2 = I-only
+#     seed_index 1=42  2=1234  3=3407  4=0  5=777

@@ -1,0 +1,16 @@
+# MTFT | exiD | baseline | seed 777
+base: _base.yaml
+
+exp_tag: exiD0-5
+dataset: exiD
+feature_mode: baseline
+
+data:
+  name: exiD
+
+model:
+  use_I: false
+
+training:
+  seed: 777
+

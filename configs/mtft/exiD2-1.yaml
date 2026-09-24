@@ -1,0 +1,16 @@
+# MTFT | exiD | I-only | seed 42
+base: _base.yaml
+
+exp_tag: exiD2-1
+dataset: exiD
+feature_mode: I
+
+data:
+  name: exiD
+
+model:
+  use_I: true
+
+training:
+  seed: 42
+
