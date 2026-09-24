@@ -41,8 +41,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--ckpt", required=True, type=Path)
     p.add_argument("--split", default="test", choices=["train", "val", "test"])
     p.add_argument("--data-root", type=Path)
-    p.add_argument("--batch-size", type=int)
-    p.add_argument("--num-workers", type=int)
+    p.add_argument("--batch-size", type=int, help="Override the checkpoint's batch size")
+    p.add_argument(
+        "--num-workers",
+        type=int,
+        help="DataLoader workers for evaluation. Defaults to 0 to avoid shared-memory mmap failures.",
+    )
     p.add_argument("--device")
     p.add_argument("--multiagent", action="store_true", help="Use data/{dataset}_multiagent/{split}_full arrays")
     p.add_argument("--scenario", action="store_true")
@@ -199,9 +203,15 @@ def main(argv: list[str] | None = None) -> int:
             lane_max_segments=lane_max_segments,
         )
     batch_size = args.batch_size or int(cfg["batch_size"])
-    num_workers = args.num_workers if args.num_workers is not None else int(cfg["num_workers"])
-    loader = DataLoader(ds, batch_size=batch_size, shuffle=False, num_workers=num_workers,
-                        collate_fn=ds.collate_fn, persistent_workers=num_workers > 0)
+    num_workers = args.num_workers if args.num_workers is not None else 0
+    loader = DataLoader(
+        ds,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=num_workers,
+        collate_fn=ds.collate_fn,
+        persistent_workers=num_workers > 0,
+    )
 
     model = Simpl(model_cfg, device).to(device)
     model.load_state_dict(ckpt["model"])
@@ -213,6 +223,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"[INFO] Lane cache : exists={lane_cache_exists}  source={'cached lanes' if lane_cache_exists else 'pseudo fallback'}")
     gpu = f"  ({torch.cuda.get_device_name(0)})" if device.type == "cuda" else ""
     print(f"[INFO] Device     : {device}{gpu}")
+    print(f"[INFO] Loader     : batch_size={batch_size}  num_workers={num_workers}")
     print(f"[INFO] Metrics    : most-likely mode by class argmax; minADE/minFDE also reported over all modes")
     print_hparam_summary(
         [

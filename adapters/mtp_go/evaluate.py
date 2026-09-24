@@ -277,6 +277,8 @@ def main(argv: list[str] | None = None) -> int:
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"[INFO] Model      : {hp.motion_model}/{hp.gnn_layer}  params={n_params:,}  "
           f"n_states={motion_model.n_states}  mixtures={motion_model.mixtures}")
+    batch_size = args.batch_size if args.batch_size is not None else int(hp.batch_size)
+    num_workers = args.num_workers if args.num_workers is not None else int(hp.n_workers)
     print_hparam_summary(
         [
             ("adapter", "MTP-GO"),
@@ -285,7 +287,8 @@ def main(argv: list[str] | None = None) -> int:
             ("eval_scope", "scored_agents" if use_multiagent else ("ego+neighbors" if ds.has_neighbor_future else "ego_only")),
             ("checkpoint_epoch", ckpt.get("epoch")),
             ("schedule_epochs", getattr(hp, "epochs", None)),
-            ("batch_size", getattr(hp, "batch_size", None)),
+            ("checkpoint_batch_size", getattr(hp, "batch_size", None)),
+            ("eval_batch_size", batch_size),
             ("learning_rate", getattr(hp, "lr", None)),
             ("grad_clip", getattr(hp, "clip", None)),
             ("seed", getattr(hp, "seed", None)),
@@ -326,8 +329,6 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     # ── Metric evaluation ─────────────────────────────────────────────────────
-    batch_size = args.batch_size if args.batch_size is not None else int(hp.batch_size)
-    num_workers = args.num_workers if args.num_workers is not None else int(hp.n_workers)
     loader_kwargs: dict[str, Any] = dict(num_workers=num_workers, pin_memory=device.type == "cuda")
     if num_workers > 0:
         loader_kwargs["persistent_workers"] = True
