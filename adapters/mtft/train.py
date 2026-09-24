@@ -441,7 +441,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     optimizer = torch.optim.Adam(model.parameters(), lr=float(cfg["lr"]), weight_decay=float(cfg["weight_decay"]))
-    ckpt_root = format_path(cfg["ckpt_dir"], cfg) / cfg["dataset"] / cfg["feature_mode"] / cfg["exp_tag"]
+    ckpt_root = format_path(cfg["ckpt_dir"], cfg) / cfg["exp_tag"]
     out_dir = format_path(cfg["output_dir"], cfg)
     out_dir.mkdir(parents=True, exist_ok=True)
     best_ade = float("inf")

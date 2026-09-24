@@ -81,8 +81,8 @@ Other supported train overrides include `--data-root`, `--split-root`,
 Evaluation:
 
 ```bash
-python evaluate.py --ckpt ckpts/mtft/highD/baseline/highD0-1/best.pt
-python evaluate.py --checkpoint ckpts/mtft/highD/I/highD2-1/best.pt --scenario
+python evaluate.py --ckpt ckpts/mtft/highD0-1/best.pt
+python evaluate.py --checkpoint ckpts/mtft/highD2-1/best.pt --scenario
 ```
 
 Useful validation commands:
@@ -92,7 +92,7 @@ python train.py --config configs/mtft/highD0-1.yaml --epochs 0 --check-data --fo
 python train.py --config configs/mtft/highD2-1.yaml --epochs 0 --check-data --forward-smoke --tiny-overfit --max-train-samples 128 --max-eval-samples 64 --overfit-steps 80
 ```
 
-Checkpoints are saved under `ckpts/mtft/{dataset}/{feature_mode}/{exp_tag}/`.
+Checkpoints are saved under `ckpts/mtft/{exp_tag}/`.
 
 Scenario breakdown is available in evaluation with `--scenario`; it uses
 `scenario_labels.csv` from the same dimI directory unless
