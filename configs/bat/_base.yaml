@@ -1,4 +1,11 @@
 # Shared base for the BAT seed sweep.
+#
+# Naming follows neighformer/configs:
+#   <dataset><feature>-<seed_index>
+#     feature    0 = baseline, BAT-style ego/neighbor/grid/behavior inputs
+#                1 = dimI, legacy dim/I mapped into BAT class/lane scalars
+#                2 = I, baseline inputs plus I appended to behavior features
+#     seed_index 1=42  2=1234  3=3407  4=0  5=777
 
 base: ../models/bat.yaml
 

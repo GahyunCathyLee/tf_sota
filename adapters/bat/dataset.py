@@ -88,6 +88,8 @@ class NeighFormerBATDataset:
         self.neighbor_distance = float(neighbor_distance)
         self.nb_feature_indices = np.asarray(feature_mode_indices(feature_mode), dtype=np.int64)
         self.nb_feature_names = feature_mode_names(feature_mode)
+        self.use_importance_feature = feature_mode == "I"
+        self.behavior_feature_dim = 7 if self.use_importance_feature else 6
         self._arrays: dict[str, np.ndarray] | None = None
 
         x_ego = np.load(self.data_dir / "x_ego.npy", mmap_mode="r")
@@ -142,7 +144,7 @@ class NeighFormerBATDataset:
         cls = np.ones((self.history_len, 1), dtype=np.float32)
 
         grid = self._place_neighbors(hist_cart, ego[:, 2:4].astype(np.float32), nb, mask)
-        feature_matrix, behavior = self._behavior_graph(grid["cart"], grid["valid"])
+        feature_matrix, behavior = self._behavior_graph(grid["cart"], grid["valid"], grid["importance"])
         lat_enc, lon_enc = self._maneuver_labels(fut_cart)
 
         return {
@@ -186,6 +188,7 @@ class NeighFormerBATDataset:
         va = np.zeros_like(cart)
         lane = np.zeros((self.max_vehicles, self.history_len, 1), dtype=np.float32)
         cls = np.zeros((self.max_vehicles, self.history_len, 1), dtype=np.float32)
+        importance = np.zeros((self.max_vehicles, self.history_len, 1), dtype=np.float32)
         valid = np.zeros(self.max_vehicles, dtype=bool)
 
         used = {EGO_GRID_INDEX}
@@ -211,12 +214,23 @@ class NeighFormerBATDataset:
             else:
                 cls[cell, :, 0] = 1.0
                 lane[cell, :, 0] = np.clip(np.round(rel_at_each_step[:, 1] / max(self.lane_width, 1.0)), -1.0, 1.0)
+            if self.use_importance_feature:
+                importance[cell, :, 0] = nb[:, slot, 9]
             cart[cell] = np.where(slot_mask[:, None], cart[cell], 0.0)
             ref_nbrs[cell] = np.where(slot_mask[:, None], ref_nbrs[cell], 0.0)
             va[cell] = np.where(slot_mask[:, None], va[cell], 0.0)
             lane[cell] = np.where(slot_mask[:, None], lane[cell], 0.0)
             cls[cell] = np.where(slot_mask[:, None], cls[cell], 0.0)
-        return {"cart": cart, "ref_nbrs": ref_nbrs, "va": va, "lane": lane, "cls": cls, "valid": valid}
+            importance[cell] = np.where(slot_mask[:, None], importance[cell], 0.0)
+        return {
+            "cart": cart,
+            "ref_nbrs": ref_nbrs,
+            "va": va,
+            "lane": lane,
+            "cls": cls,
+            "importance": importance,
+            "valid": valid,
+        }
 
     def _grid_cell(self, dx: float, dy: float, used: set[int]) -> int | None:
         gx, gy = self.grid_size
@@ -233,7 +247,12 @@ class NeighFormerBATDataset:
                 return cell
         return None
 
-    def _behavior_graph(self, nbr_cart: np.ndarray, nbr_valid: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    def _behavior_graph(
+        self,
+        nbr_cart: np.ndarray,
+        nbr_valid: np.ndarray,
+        importance: np.ndarray | None = None,
+    ) -> tuple[np.ndarray, np.ndarray]:
         positions = nbr_cart.copy()
         positions[EGO_GRID_INDEX] = 0.0
         valid = nbr_valid.copy()
@@ -266,7 +285,13 @@ class NeighFormerBATDataset:
         diff = np.zeros_like(centrality)
         if t_len > 1:
             diff[1:] = centrality[1:] - centrality[:-1]
-        behavior = np.concatenate([diff, centrality], axis=-1).astype(np.float32)
+        behavior_parts = [diff, centrality]
+        if self.use_importance_feature:
+            imp = np.zeros((t_len, self.max_vehicles, 1), dtype=np.float32)
+            if importance is not None:
+                imp = np.transpose(importance, (1, 0, 2)).astype(np.float32)
+            behavior_parts.append(imp)
+        behavior = np.concatenate(behavior_parts, axis=-1).astype(np.float32)
         return feature, behavior
 
     @staticmethod
@@ -339,7 +364,7 @@ class NeighFormerBATDataset:
             "nbrs_ref_self": zeros(t_h, n_nbr, 2),
             "nbrs_ref_nbrs": zeros(t_h, n_nbr, 2),
             "feature_matrix": zeros(t_h, bsz, self.max_vehicles, self.max_vehicles),
-            "behavior": zeros(t_h, bsz, self.max_vehicles, 6),
+            "behavior": zeros(t_h, bsz, self.max_vehicles, self.behavior_feature_dim),
             "target": zeros(bsz, t_f, 2),
             "sample_index": torch.zeros(bsz, dtype=torch.long),
         }
@@ -389,6 +414,8 @@ class NeighFormerBATDataset:
             "neighbor_names": self.nb_feature_names,
             "samples_described": n,
             "dimI_mapping": "neighbor dim -> BAT class scalar, I -> BAT lane scalar" if self.feature_mode == "dimI" else "disabled",
+            "I_mapping": "neighbor I -> appended BAT behavior scalar; class/lane inputs stay baseline-style" if self.use_importance_feature else "disabled",
+            "behavior_feature_dim": self.behavior_feature_dim,
             "behavior_features": "degree/closeness/eigenvector centrality plus first differences from NeighFormer kinematics",
         }
 

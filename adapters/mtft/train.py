@@ -47,6 +47,7 @@ DEFAULTS: dict[str, Any] = {
     "epochs": 100,
     "lr": 1.0e-4,
     "weight_decay": 0.0,
+    "loss": "ade",
     "amp": True,
     "grad_clip": 1.0,
     "ckpt_dir": "ckpts/mtft",
@@ -76,6 +77,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--device", type=str)
     p.add_argument("--lr", type=float)
     p.add_argument("--weight-decay", type=float)
+    p.add_argument("--loss", choices=["ade", "mse"])
     p.add_argument("--grad-clip", type=float)
     p.add_argument("--amp", action=argparse.BooleanOptionalAction)
     p.add_argument("--hidden-dim", type=int)
@@ -166,6 +168,7 @@ def apply_cli(cfg: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]:
         ("device", "device"),
         ("lr", "lr"),
         ("weight_decay", "weight_decay"),
+        ("loss", "loss"),
         ("grad_clip", "grad_clip"),
         ("amp", "amp"),
         ("max_train_samples", "max_train_samples"),
@@ -296,11 +299,11 @@ def train_one_epoch(
     optimizer: torch.optim.Optimizer,
     cfg: dict[str, Any],
     epoch: int,
-) -> dict[str, float]:
+) -> dict[str, Any]:
     model.train()
-    loss_fn = torch.nn.MSELoss()
+    loss_name = str(cfg.get("loss", "ade")).lower()
     use_amp = bool(cfg.get("amp", True)) and device.type == "cuda"
-    total = 0.0
+    sum_loss = sum_ade = sum_rmse = 0.0
     count = 0
     pbar = tqdm(loader, desc=f"Train {epoch}", leave=False, dynamic_ncols=True)
     for batch in pbar:
@@ -311,21 +314,40 @@ def train_one_epoch(
         optimizer.zero_grad(set_to_none=True)
         with autocast(device_type=device.type, enabled=use_amp, dtype=torch.bfloat16):
             pred = model(agents, obs_mask, agent_mask)
-            loss = loss_fn(pred.float(), target.float())
+            loss = trajectory_loss(pred.float(), target.float(), loss_name)
         loss.backward()
         grad_clip = float(cfg.get("grad_clip") or 0.0)
         if grad_clip > 0:
             torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
         optimizer.step()
-        total += float(loss.detach())
+        with torch.no_grad():
+            dist = torch.norm(pred.float() - target.float(), dim=-1)
+            batch_ade = dist.mean()
+            batch_rmse = dist.pow(2).mean().sqrt()
+        sum_loss += float(loss.detach())
+        sum_ade += float(batch_ade.detach())
+        sum_rmse += float(batch_rmse.detach())
         count += 1
-        pbar.set_postfix(mse=f"{float(loss.detach()):.4f}", rmse=f"{math_sqrt(float(loss.detach())):.3f}")
-    mse = total / max(1, count)
-    return {"loss_mse": mse, "loss_rmse": math_sqrt(mse)}
+        pbar.set_postfix(
+            loss=f"{float(loss.detach()):.4f}",
+            ADE=f"{float(batch_ade.detach()):.3f}",
+            RMSE=f"{float(batch_rmse.detach()):.3f}",
+        )
+    n = max(1, count)
+    return {
+        "loss": sum_loss / n,
+        "loss_type": loss_name,
+        "ade": sum_ade / n,
+        "rmse": sum_rmse / n,
+    }
 
 
-def math_sqrt(value: float) -> float:
-    return float(np.sqrt(max(0.0, value)))
+def trajectory_loss(pred: torch.Tensor, target: torch.Tensor, loss_name: str) -> torch.Tensor:
+    if loss_name == "ade":
+        return torch.norm(pred - target, dim=-1).mean()
+    if loss_name == "mse":
+        return torch.nn.functional.mse_loss(pred, target)
+    raise ValueError(f"Unsupported MTFT training loss: {loss_name}")
 
 
 def run_forward_smoke(model: MTFT, loader: DataLoader, device: torch.device) -> None:
@@ -349,7 +371,7 @@ def run_tiny_overfit(cfg: dict[str, Any], device: torch.device) -> None:
     loader = make_loader(train_ds, min(32, int(cfg["batch_size"])), 0, True, False, False)
     model = build_model(cfg, train_ds).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=float(cfg["lr"]), weight_decay=float(cfg["weight_decay"]))
-    loss_fn = torch.nn.MSELoss()
+    loss_name = str(cfg.get("loss", "ade")).lower()
     first_loss = None
     last_loss = None
     steps = int(cfg.get("overfit_steps", 80))
@@ -367,14 +389,14 @@ def run_tiny_overfit(cfg: dict[str, Any], device: torch.device) -> None:
         target = batch["target"].to(device)
         optimizer.zero_grad(set_to_none=True)
         pred = model(agents, obs_mask, agent_mask)
-        loss = loss_fn(pred, target)
+        loss = trajectory_loss(pred, target, loss_name)
         loss.backward()
         grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), float(cfg.get("grad_clip") or 1.0))
         optimizer.step()
         value = float(loss.detach())
         first_loss = value if first_loss is None else first_loss
         last_loss = value
-    print(f"[Tiny overfit] samples={len(train_ds)} steps={steps} first_mse={first_loss:.4f} last_mse={last_loss:.4f} grad_norm={float(grad_norm):.4f}")
+    print(f"[Tiny overfit] samples={len(train_ds)} steps={steps} loss={loss_name} first={first_loss:.4f} last={last_loss:.4f} grad_norm={float(grad_norm):.4f}")
 
 
 def save_checkpoint(path: Path, model: MTFT, cfg: dict[str, Any], metrics: dict[str, Any], epoch: int) -> None:
@@ -450,7 +472,12 @@ def main(argv: list[str] | None = None) -> int:
         train_metrics = train_one_epoch(model, train_loader, device, optimizer, cfg, epoch)
         val_metrics = evaluate_model(model, val_loader, device, cfg)
         elapsed = time.perf_counter() - start
-        print(f"[Epoch {epoch}] train_rmse={train_metrics['loss_rmse']:.4f} val_ADE={val_metrics['ade']:.4f} val_FDE={val_metrics['fde']:.4f} val_RMSE={val_metrics['rmse']:.4f} elapsed={elapsed:.1f}s")
+        print(
+            f"[Epoch {epoch}] train_loss({train_metrics['loss_type']})={train_metrics['loss']:.4f} "
+            f"train_ADE={train_metrics['ade']:.4f} train_RMSE={train_metrics['rmse']:.4f} "
+            f"val_ADE={val_metrics['ade']:.4f} val_FDE={val_metrics['fde']:.4f} "
+            f"val_RMSE={val_metrics['rmse']:.4f} elapsed={elapsed:.1f}s"
+        )
         all_metrics = {"train": train_metrics, "val": val_metrics}
         save_checkpoint(ckpt_root / "last.pt", model, cfg, all_metrics, epoch)
         if float(val_metrics["ade"]) < best_ade:

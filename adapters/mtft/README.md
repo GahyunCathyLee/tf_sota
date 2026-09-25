@@ -69,13 +69,14 @@ python train.py \
   --num-workers 2 \
   --lr 1e-4 \
   --weight-decay 0.0 \
+  --loss ade \
   --grad-clip 1.0 \
   --ckpt-dir /content/drive/MyDrive/TrajectoryPrediction/ckpts/mtft \
   --output-dir /content/drive/MyDrive/TrajectoryPrediction/runs/mtft/{dataset}/{feature_mode}/{exp_tag}
 ```
 
 Other supported train overrides include `--data-root`, `--split-root`,
-`--exp-tag`, `--seed`, `--device`, `--amp/--no-amp`, `--hidden-dim`,
+`--exp-tag`, `--seed`, `--device`, `--loss ade|mse`, `--amp/--no-amp`, `--hidden-dim`,
 `--num-layers`, `--num-heads`, and `--dropout`.
 
 Evaluation:
@@ -100,4 +101,4 @@ Scenario breakdown is available in evaluation with `--scenario`; it uses
 
 ## Deviations
 
-The original paper reports experiments with different sampling rates and horizons. This adapter uses the existing processed highD/exiD setup: 6 history steps and 15 future steps. The training loss is deterministic trajectory MSE, matching the official code's regression objective. Numerical paper reproduction is intentionally not attempted.
+The original paper reports experiments with different sampling rates and horizons. This adapter uses the existing processed highD/exiD setup: 6 history steps and 15 future steps. The default training objective is ADE (`mean ||pred - gt||`) so checkpoint selection and optimization align with the primary NeighFormer-style metric; `--loss mse` is available for regression-loss ablations. Numerical paper reproduction is intentionally not attempted.

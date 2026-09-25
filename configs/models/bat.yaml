@@ -17,6 +17,7 @@ input:
   ego_channels: 6
   neighbor_baseline_channels: 6
   raw_neighbor_channels: 10
+  neighbor_I_channels: 7
   neighbor_dimI_channels: 8
 
 training:
@@ -84,4 +85,5 @@ notes:
   - "Uses the official BAT GDEncoder and Generator modules from https://github.com/Petrichor625/BATraj-Behavior-aware-Model."
   - "The released upstream data/train scripts are hard-coded for NGSIM .mat files; this adapter replaces only the data/input loop."
   - "NeighFormer kinematics are converted to BAT's 13x3 social grid and behavior centrality tensors."
+  - "I mode preserves BAT's trajectory/class/lane inputs and appends NeighFormer I as a seventh behavior feature."
   - "dimI mode maps neighbor dim to BAT's class scalar and I to BAT's lane scalar; ego uses neutral fills."
