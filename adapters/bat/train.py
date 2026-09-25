@@ -41,6 +41,7 @@ DEFAULTS: dict[str, Any] = {
     "num_workers": 4,
     "pin_memory": True,
     "persistent_workers": True,
+    "prefetch_factor": 2,
     "seed": 42,
     "device": "auto",
     "epochs": 100,
@@ -91,6 +92,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--epochs", type=int)
     p.add_argument("--batch-size", type=int)
     p.add_argument("--num-workers", type=int)
+    p.add_argument("--prefetch-factor", type=int)
+    p.add_argument("--no-persistent-workers", action="store_true")
+    p.add_argument("--no-pin-memory", action="store_true")
     p.add_argument("--seed", type=int)
     p.add_argument("--device")
     p.add_argument("--lr", type=float)
@@ -215,6 +219,7 @@ def apply_cli(cfg: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]:
         ("epochs", "epochs"),
         ("batch_size", "batch_size"),
         ("num_workers", "num_workers"),
+        ("prefetch_factor", "prefetch_factor"),
         ("seed", "seed"),
         ("device", "device"),
         ("lr", "lr"),
@@ -228,6 +233,10 @@ def apply_cli(cfg: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]:
             cfg[cfg_name] = value
     if args.reuse_processed:
         cfg["reuse_processed"] = True
+    if args.no_persistent_workers:
+        cfg["persistent_workers"] = False
+    if args.no_pin_memory:
+        cfg["pin_memory"] = False
     if args.multiagent:
         cfg["multiagent"] = True
     if args.use_importance is not None:
@@ -455,16 +464,18 @@ def metric_valid_mask(batch: dict[str, Any]) -> Any:
 def make_loader(ds: NeighFormerBATDataset, cfg: dict[str, Any], shuffle: bool, drop_last: bool = False):
     _, DataLoader = require_torch()
     workers = int(cfg["num_workers"])
-    return DataLoader(
-        ds,
-        batch_size=int(cfg["batch_size"]),
-        shuffle=shuffle,
-        drop_last=drop_last,
-        num_workers=workers,
-        pin_memory=bool(cfg["pin_memory"]),
-        persistent_workers=bool(cfg["persistent_workers"]) and workers > 0,
-        collate_fn=ds.collate_fn,
-    )
+    kwargs = {
+        "batch_size": int(cfg["batch_size"]),
+        "shuffle": shuffle,
+        "drop_last": drop_last,
+        "num_workers": workers,
+        "pin_memory": bool(cfg["pin_memory"]),
+        "persistent_workers": bool(cfg["persistent_workers"]) and workers > 0,
+        "collate_fn": ds.collate_fn,
+    }
+    if workers > 0 and cfg.get("prefetch_factor") is not None:
+        kwargs["prefetch_factor"] = int(cfg["prefetch_factor"])
+    return DataLoader(ds, **kwargs)
 
 
 def evaluate_epoch(gd_encoder: Any, generator: Any, loader: Any, device: Any, cfg: dict[str, Any], ds: NeighFormerBATDataset) -> tuple[dict[str, Any], float]:
@@ -557,6 +568,12 @@ def main(argv: list[str] | None = None) -> int:
         print(f"val data : {training_data_path(cfg, 'val')}")
     print(f"edge I   : {bool(cfg.get('use_importance'))}")
     print(f"samples  : train={len(train_ds):,} val={len(val_ds):,}")
+    print(
+        f"loader   : batch_size={cfg['batch_size']} workers={cfg['num_workers']} "
+        f"prefetch={cfg.get('prefetch_factor')} persistent={bool(cfg['persistent_workers'])} "
+        f"pin_memory={bool(cfg['pin_memory'])}",
+        flush=True,
+    )
     print(f"ckpt     : {ckpt_dir}")
     best_fde = float("inf")
     for epoch in range(1, int(cfg["epochs"]) + 1):
@@ -564,7 +581,16 @@ def main(argv: list[str] | None = None) -> int:
         generator.train()
         total = 0.0
         epoch_start = time.perf_counter()
+        wait_start = time.perf_counter()
+        print(f"epoch {epoch:03d} waiting for first train batch...", flush=True)
         for step, raw in enumerate(train_loader, start=1):
+            load_wait = time.perf_counter() - wait_start
+            if step == 1:
+                print(
+                    f"epoch {epoch:03d} first batch loaded in {load_wait:.1f}s "
+                    f"targets={int(raw['hist'].shape[1])}",
+                    flush=True,
+                )
             batch = move_batch(raw, device)
             pred, lat_pred, lon_pred = forward_models(gd_encoder, generator, batch)
             reg = mse_loss(pred, batch["fut"], batch["op_mask"]) if epoch <= int(model_args["pre_epoch"]) or model_args["use_mse"] else nll_loss(pred, batch["fut"], batch["op_mask"])
@@ -584,6 +610,7 @@ def main(argv: list[str] | None = None) -> int:
                     f"loss={total / step:.4f} elapsed={(time.perf_counter() - epoch_start) / 60.0:.1f}m",
                     flush=True,
                 )
+            wait_start = time.perf_counter()
         metrics, val_loss = evaluate_epoch(gd_encoder, generator, val_loader, device, cfg, train_ds)
         metrics["val_loss"] = val_loss
         print(
