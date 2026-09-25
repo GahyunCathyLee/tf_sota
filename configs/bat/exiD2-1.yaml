@@ -3,5 +3,10 @@ base: _base.yaml
 exp_tag: exiD2-1
 dataset: exiD
 feature_mode: I
+data:
+  root: data
 runtime:
   seed: 42
+training:
+  multiagent: true
+  use_importance: true

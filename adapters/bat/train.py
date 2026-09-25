@@ -18,8 +18,10 @@ EXPERIMENT_ROOT = ADAPTER_DIR.parents[1]
 sys.path.insert(0, str(EXPERIMENT_ROOT))
 
 from adapters.bat.dataset import NeighFormerBATDataset, polar_to_cart, write_preprocess_manifest  # noqa: E402
+from adapters.bat.multiagent_dataset import MultiAgentBATDataset  # noqa: E402
 from adapters.bat.upstream import import_bat_model, upstream_commit  # noqa: E402
 from adapters.common import dataset_dir, split_indices_path  # noqa: E402
+from adapters.multiagent_common import multiagent_indices, multiagent_split_dir  # noqa: E402
 
 try:
     import yaml
@@ -53,6 +55,8 @@ DEFAULTS: dict[str, Any] = {
     "max_train_samples": None,
     "max_eval_samples": None,
     "upstream_dir": "external/bat",
+    "multiagent": False,
+    "use_importance": None,
     "model_hparams": {},
     "smoke": {
         "epochs": 1,
@@ -93,6 +97,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--max-train-samples", type=int)
     p.add_argument("--max-eval-samples", type=int)
     p.add_argument("--upstream-dir", type=Path)
+    p.add_argument("--multiagent", action="store_true", help="Use data/{dataset}_multiagent/{split}_full arrays")
+    group = p.add_mutually_exclusive_group()
+    group.add_argument("--use-importance", dest="use_importance", action="store_true")
+    group.add_argument("--no-use-importance", dest="use_importance", action="store_false")
+    p.set_defaults(use_importance=None)
     p.add_argument("--resume", type=Path)
     p.add_argument("--check-data", action="store_true")
     return p.parse_args(argv)
@@ -217,8 +226,16 @@ def apply_cli(cfg: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]:
             cfg[cfg_name] = value
     if args.reuse_processed:
         cfg["reuse_processed"] = True
+    if args.multiagent:
+        cfg["multiagent"] = True
+    if args.use_importance is not None:
+        cfg["use_importance"] = bool(args.use_importance)
     if not cfg["dataset"] or not cfg["feature_mode"]:
         raise SystemExit("dataset and feature_mode must be set by config or CLI")
+    if cfg.get("use_importance") is None:
+        cfg["use_importance"] = cfg["feature_mode"] == "I"
+    if bool(cfg.get("use_importance")) and not bool(cfg.get("multiagent")):
+        raise SystemExit("BAT use_importance=true / feature_mode=I requires --multiagent or training.multiagent: true")
     if not cfg["exp_tag"]:
         feature_code = {"baseline": 0, "dimI": 1, "I": 2}[cfg["feature_mode"]]
         cfg["exp_tag"] = f"{cfg['dataset']}{feature_code}"
@@ -251,11 +268,27 @@ def subset_indices(indices: np.ndarray, limit: int | None) -> np.ndarray:
     return indices if limit is None else indices[: int(limit)]
 
 
-def build_dataset(cfg: dict[str, Any], split: str, limit: int | None = None) -> NeighFormerBATDataset:
+def build_dataset(cfg: dict[str, Any], split: str, limit: int | None = None):
     data_root = resolve_path(cfg["data_root"])
+    hp = cfg.get("model_hparams") or {}
+    if cfg.get("multiagent"):
+        split_dir = multiagent_split_dir(data_root, cfg["dataset"], split)
+        return MultiAgentBATDataset(
+            split_dir,
+            cfg["dataset"],
+            cfg["feature_mode"],
+            split,
+            indices=multiagent_indices(split_dir, limit),
+            grid_size=(int(hp.get("grid_cols", 13)), int(hp.get("grid_rows", 3))),
+            enc_size=int(hp.get("lstm_encoder_size", 64)),
+            polar=bool(hp.get("polar", True)),
+            longitudinal_cell=float(hp.get("longitudinal_cell", 15.0)),
+            lane_width=float(hp.get("lane_width", 3.7)),
+            neighbor_distance=float(hp.get("neighbor_distance", 100.0)),
+            use_importance=bool(cfg.get("use_importance")),
+        )
     indices = np.load(split_indices_path(data_root, cfg["dataset"], split))
     indices = subset_indices(indices, limit)
-    hp = cfg.get("model_hparams") or {}
     return NeighFormerBATDataset(
         dataset_dir(data_root, cfg["dataset"]),
         indices,
@@ -272,7 +305,8 @@ def build_dataset(cfg: dict[str, Any], split: str, limit: int | None = None) -> 
 
 
 def build_data_report(cfg: dict[str, Any], train_ds: NeighFormerBATDataset, val_ds: NeighFormerBATDataset) -> dict[str, Any]:
-    sample = train_ds[0] if len(train_ds) else {}
+    raw_sample = train_ds[0] if len(train_ds) else {}
+    sample = raw_sample[0] if isinstance(raw_sample, list) and raw_sample else raw_sample
     sample_shapes = {
         key: list(value.shape) if hasattr(value, "shape") else None
         for key, value in sample.items()
@@ -290,6 +324,8 @@ def build_data_report(cfg: dict[str, Any], train_ds: NeighFormerBATDataset, val_
             "local_dir": str(resolve_path(cfg["upstream_dir"])),
             "commit": upstream_commit(cfg["upstream_dir"]),
         },
+        "source": "multiagent" if cfg.get("multiagent") else "single-agent canonical",
+        "use_importance": bool(cfg.get("use_importance")),
     }
 
 
@@ -431,7 +467,7 @@ def evaluate_epoch(gd_encoder: Any, generator: Any, loader: Any, device: Any, cf
             batch = move_batch(raw, device)
             pred, lat_pred, lon_pred = forward_models(gd_encoder, generator, batch)
             loss = mse_loss(pred, batch["fut"], batch["op_mask"])
-            acc.update(prediction_cart(pred, ds.polar), batch["target"])
+            acc.update(prediction_cart(pred, ds.polar), batch["target"], valid_mask=batch["op_mask"][..., 0].bool())
             total_loss += float(loss.detach())
             total_batches += 1
             _ = lat_pred, lon_pred
@@ -502,6 +538,8 @@ def main(argv: list[str] | None = None) -> int:
     print("====== BAT Train ======")
     print(f"upstream : {upstream_dir} ({upstream_commit(upstream_dir)})")
     print(f"data     : {dataset_dir(resolve_path(cfg['data_root']), cfg['dataset'])}")
+    print(f"source   : {'multiagent' if cfg.get('multiagent') else 'single-agent canonical'}")
+    print(f"edge I   : {bool(cfg.get('use_importance'))}")
     print(f"samples  : train={len(train_ds):,} val={len(val_ds):,}")
     print(f"ckpt     : {ckpt_dir}")
     best_fde = float("inf")

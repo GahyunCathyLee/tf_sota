@@ -373,6 +373,9 @@ class NeighFormerBATDataset:
             for key in ("hist", "hist_relative", "fut", "va", "lane", "cls"):
                 dest = key if key != "fut" else "fut"
                 batch[dest][:, b] = tensor_from(sample[key])
+            if "target_valid" in sample:
+                valid = tensor_from(sample["target_valid"]).bool()
+                batch["op_mask"][:, b, :] = valid[:, None].float()
             batch["lat_enc"][b] = tensor_from(sample["lat_enc"])
             batch["lon_enc"][b] = tensor_from(sample["lon_enc"])
             batch["feature_matrix"][:, b] = tensor_from(sample["feature_matrix"])

@@ -116,7 +116,7 @@ def run_evaluate(gd_encoder: Any, generator: Any, loader: Any, device: Any, cfg:
             pred, all_modes = select_prediction(fut_pred, lat_pred, lon_pred, ds.polar)
             sample_indices = raw["sample_index"].detach().cpu().numpy()
             label_rows = labels.lookup(sample_indices) if labels is not None and labels.enabled else None
-            acc.update(pred, batch["target"], all_modes=all_modes, labels=label_rows)
+            acc.update(pred, batch["target"], all_modes=all_modes, valid_mask=batch["op_mask"][..., 0].bool(), labels=label_rows)
     return acc
 
 
