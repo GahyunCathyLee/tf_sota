@@ -21,8 +21,6 @@ mkdir -p "$LOG_DIR"
 cases=(
   "exiD-baseline|ckpts/qcnet/exiD0-5/best.pt"
   "exiD-+I|ckpts/qcnet/exiD2-5/best.pt"
-  "highD-baseline|ckpts/qcnet/highD0-4/best.pt"
-  "highD-+I|ckpts/qcnet/highD2-3/best.pt"
 )
 
 cd "$ROOT"
@@ -33,14 +31,10 @@ for row in "${cases[@]}"; do
   log_path="${LOG_DIR}/${name}.log"
 
   ckpt_key=""
-  if [[ "$dataset" == "exiD" && "$condition" == "baseline" ]]; then
+  if [[ "$condition" == "baseline" ]]; then
     ckpt_key="${EXID_BASE_CKPT:-}"
-  elif [[ "$dataset" == "exiD" ]]; then
+  else
     ckpt_key="${EXID_I_CKPT:-}"
-  elif [[ "$dataset" == "highD" && "$condition" == "baseline" ]]; then
-    ckpt_key="${HIGHD_BASE_CKPT:-}"
-  elif [[ "$dataset" == "highD" ]]; then
-    ckpt_key="${HIGHD_I_CKPT:-}"
   fi
   if [[ -n "$ckpt_key" ]]; then
     ckpt="$ckpt_key"
