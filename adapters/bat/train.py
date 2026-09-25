@@ -447,6 +447,11 @@ def prediction_cart(pred: Any, polar: bool) -> Any:
     return polar_to_cart(pred[:, :, 0:2].permute(1, 0, 2)) if polar else pred[:, :, 0:2].permute(1, 0, 2)
 
 
+def metric_valid_mask(batch: dict[str, Any]) -> Any:
+    """Convert BAT's loss mask layout (T, B, 2) to metric layout (B, T)."""
+    return batch["op_mask"][..., 0].transpose(0, 1).bool()
+
+
 def make_loader(ds: NeighFormerBATDataset, cfg: dict[str, Any], shuffle: bool, drop_last: bool = False):
     _, DataLoader = require_torch()
     workers = int(cfg["num_workers"])
@@ -476,7 +481,7 @@ def evaluate_epoch(gd_encoder: Any, generator: Any, loader: Any, device: Any, cf
             batch = move_batch(raw, device)
             pred, lat_pred, lon_pred = forward_models(gd_encoder, generator, batch)
             loss = mse_loss(pred, batch["fut"], batch["op_mask"])
-            acc.update(prediction_cart(pred, ds.polar), batch["target"], valid_mask=batch["op_mask"][..., 0].bool())
+            acc.update(prediction_cart(pred, ds.polar), batch["target"], valid_mask=metric_valid_mask(batch))
             total_loss += float(loss.detach())
             total_batches += 1
             _ = lat_pred, lon_pred

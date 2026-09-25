@@ -17,7 +17,7 @@ EXPERIMENT_ROOT = ADAPTER_DIR.parents[1]
 sys.path.insert(0, str(EXPERIMENT_ROOT))
 
 from adapters.bat.dataset import polar_to_cart  # noqa: E402
-from adapters.bat.train import build_dataset, make_loader, move_batch, prediction_cart, resolve_path  # noqa: E402
+from adapters.bat.train import build_dataset, make_loader, metric_valid_mask, move_batch, prediction_cart, resolve_path  # noqa: E402
 from adapters.bat.upstream import import_bat_model  # noqa: E402
 
 
@@ -116,7 +116,7 @@ def run_evaluate(gd_encoder: Any, generator: Any, loader: Any, device: Any, cfg:
             pred, all_modes = select_prediction(fut_pred, lat_pred, lon_pred, ds.polar)
             sample_indices = raw["sample_index"].detach().cpu().numpy()
             label_rows = labels.lookup(sample_indices) if labels is not None and labels.enabled else None
-            acc.update(pred, batch["target"], all_modes=all_modes, valid_mask=batch["op_mask"][..., 0].bool(), labels=label_rows)
+            acc.update(pred, batch["target"], all_modes=all_modes, valid_mask=metric_valid_mask(batch), labels=label_rows)
     return acc
 
 
