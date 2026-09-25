@@ -94,6 +94,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--seed", type=int)
     p.add_argument("--device")
     p.add_argument("--lr", type=float)
+    p.add_argument("--log-interval", type=int)
     p.add_argument("--max-train-samples", type=int)
     p.add_argument("--max-eval-samples", type=int)
     p.add_argument("--upstream-dir", type=Path)
@@ -217,6 +218,7 @@ def apply_cli(cfg: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]:
         ("seed", "seed"),
         ("device", "device"),
         ("lr", "lr"),
+        ("log_interval", "log_interval"),
         ("max_train_samples", "max_train_samples"),
         ("max_eval_samples", "max_eval_samples"),
         ("upstream_dir", "upstream_dir"),
@@ -250,6 +252,13 @@ def resolve_path(path: str | Path) -> Path:
 
 def format_path_template(value: str | Path, cfg: dict[str, Any]) -> Path:
     return resolve_path(str(value).format(dataset=cfg["dataset"], feature_mode=cfg["feature_mode"], exp_tag=cfg["exp_tag"]))
+
+
+def training_data_path(cfg: dict[str, Any], split: str = "train") -> Path:
+    data_root = resolve_path(cfg["data_root"])
+    if cfg.get("multiagent"):
+        return multiagent_split_dir(data_root, cfg["dataset"], split)
+    return dataset_dir(data_root, cfg["dataset"])
 
 
 def set_seed(seed: int) -> None:
@@ -537,8 +546,10 @@ def main(argv: list[str] | None = None) -> int:
 
     print("====== BAT Train ======")
     print(f"upstream : {upstream_dir} ({upstream_commit(upstream_dir)})")
-    print(f"data     : {dataset_dir(resolve_path(cfg['data_root']), cfg['dataset'])}")
     print(f"source   : {'multiagent' if cfg.get('multiagent') else 'single-agent canonical'}")
+    print(f"data     : {training_data_path(cfg, 'train')}")
+    if cfg.get("multiagent"):
+        print(f"val data : {training_data_path(cfg, 'val')}")
     print(f"edge I   : {bool(cfg.get('use_importance'))}")
     print(f"samples  : train={len(train_ds):,} val={len(val_ds):,}")
     print(f"ckpt     : {ckpt_dir}")
