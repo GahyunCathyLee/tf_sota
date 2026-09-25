@@ -46,7 +46,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--model", help="Optional legacy selector; adapter is inferred from --ckpt.")
     parser.add_argument("--ckpt", "--checkpoint", dest="ckpt", required=True, type=Path)
-    known, _ = parser.parse_known_args(argv)
+    known, rest = parser.parse_known_args(argv)
     adapter = str(known.model) if known.model else detect_adapter(known.ckpt)
     if adapter == "mtp_go":
         from adapters.mtp_go.evaluate import main as adapter_main
@@ -68,7 +68,8 @@ def main(argv: list[str] | None = None) -> int:
         from adapters.mtft.evaluate import main as adapter_main
     else:
         raise SystemExit(f"Unknown adapter '{adapter}' in {known.ckpt}")
-    return adapter_main(argv)
+    adapter_argv = ["--ckpt", str(known.ckpt), *rest]
+    return adapter_main(adapter_argv)
 
 
 if __name__ == "__main__":

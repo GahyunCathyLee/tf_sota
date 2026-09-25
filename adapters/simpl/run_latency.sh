@@ -9,6 +9,7 @@ fi
 
 WARMUP="${WARMUP:-1000}"
 ITERS="${ITERS:-10000}"
+DEVICE="${DEVICE:-cuda}"
 DRY_RUN="${DRY_RUN:-0}"
 LOG_DIR="${LOG_DIR:-${ROOT}/logs/latency/simpl}"
 mkdir -p "$LOG_DIR"
@@ -48,13 +49,13 @@ for row in "${cases[@]}"; do
   fi
 
   cmd=(
-    "$PYTHON_BIN" evaluate.py
-    --model simpl
+    "$PYTHON_BIN" adapters/simpl/evaluate.py
     --ckpt "$ckpt"
     --split test
     --measure-time
     --warmup "$WARMUP"
     --iters "$ITERS"
+    --device "$DEVICE"
   )
   if [[ -n "${DATA_ROOT:-}" ]]; then
     cmd+=(--data-root "$DATA_ROOT")
